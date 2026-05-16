@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "ChannelHub-PG",
+      "Group": "ChannelHub",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "channelhub",
+      "Username": "channelhub",
+      "SSLMode": "prefer",
+      "Comment": "ChannelHub 主数据库（容器网络内主机名 postgres；首次连接需手动输入 .env 中的 POSTGRES_PASSWORD）"
+    }
+  }
+}

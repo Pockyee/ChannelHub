@@ -1,0 +1,13 @@
+# 真实凭据，禁止提交
+.env
+
+# 本地数据 / 运行产物
+data/
+*.log
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+__pycache__/
+*.pyc

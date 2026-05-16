@@ -1,0 +1,154 @@
+name: channelhub
+
+# 进销存数据平台 — 本地开发基础设施
+# 变量取值来自同目录 .env（由 openssl 随机生成；模板见 .env.example）
+# 本轮仅基础设施，不含业务表 DDL。
+
+services:
+  # ---------------------------------------------------------------------------
+  # 主数据库：承载 channelhub(主业务库) + metabase + prefect 三个库
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    container_name: channelhub-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      # 首启（空卷）时自动执行：仅创建 metabase / prefect 空支撑库
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # 数据库可视化管理；已预注册 ChannelHub-PG 服务器
+  # ---------------------------------------------------------------------------
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: channelhub-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+      PGADMIN_CONFIG_SERVER_MODE: "True"
+    ports:
+      - "${PGADMIN_PORT:-5050}:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # 对象存储：邮件源文件备份桶（写入逻辑后续由 Prefect 实现）
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: channelhub-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # 一次性任务：等待 MinIO 就绪后幂等创建桶，跑完即退出
+  # ---------------------------------------------------------------------------
+  minio-init:
+    image: minio/mc:latest
+    container_name: channelhub-minio-init
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" >/dev/null 2>&1; do
+        echo 'waiting for minio...'; sleep 2;
+      done;
+      mc mb --ignore-existing local/\"$$MINIO_BUCKET\";
+      echo 'bucket ready: '\"$$MINIO_BUCKET\";
+      "
+    restart: "no"
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # BI 报表；应用元数据库指向 postgres 的 metabase 库
+  # ---------------------------------------------------------------------------
+  metabase:
+    image: metabase/metabase:latest
+    container_name: channelhub-metabase
+    restart: unless-stopped
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabase
+      MB_DB_PORT: "5432"
+      MB_DB_HOST: postgres
+      MB_DB_USER: ${POSTGRES_USER}
+      MB_DB_PASS: ${POSTGRES_PASSWORD}
+    ports:
+      - "${METABASE_PORT:-3000}:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # Prefect 3 OSS server；后端库指向 postgres 的 prefect 库
+  # ---------------------------------------------------------------------------
+  prefect:
+    image: prefecthq/prefect:3-latest
+    container_name: channelhub-prefect
+    restart: unless-stopped
+    command: prefect server start --host 0.0.0.0 --port 4200
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/prefect
+      PREFECT_API_URL: http://localhost:${PREFECT_PORT:-4200}/api
+      # 让浏览器 SPA 用相对路径访问 API：无论经 localhost / 127.0.0.1 / LAN IP
+      # 打开 UI 都能连通（解决从非 docker 主机访问时 "Oops" 报错）
+      PREFECT_UI_API_URL: /api
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+    ports:
+      - "${PREFECT_PORT:-4200}:4200"
+    volumes:
+      - prefect_data:/root/.prefect
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - channelhub
+
+volumes:
+  pg_data:
+  pgadmin_data:
+  minio_data:
+  prefect_data:
+
+networks:
+  channelhub:
+    driver: bridge
