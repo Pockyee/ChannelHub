@@ -1,0 +1,33 @@
+# ChannelHub Prefect 部署定义
+# 由 prefect-deploy 一次性容器执行 `prefect deploy --all` 注册到服务端。
+# 进程型 work pool；worker 容器已把代码挂到 /app，故工作目录设为 /app。
+
+name: channelhub
+prefect-version: "3"
+
+build: null
+push: null
+pull:
+  - prefect.deployments.steps.set_working_directory:
+      directory: /app
+
+deployments:
+  - name: email-backup
+    entrypoint: flows/email_backup.py:email_backup
+    description: "IONOS 邮箱 INBOX 源文件定时备份到 MinIO（幂等）"
+    work_pool:
+      name: channelhub-pool
+    schedules:
+      - cron: "{{ $EMAIL_BACKUP_CRON }}"
+        timezone: "UTC"
+        active: true
+
+  - name: parse-sell-through
+    entrypoint: flows/parse_sell_through.py:parse_sell_through
+    description: "MinIO .eml → xlsx → 表头识别 → raw.sell_through_<供应商>；未识别发告警"
+    work_pool:
+      name: channelhub-pool
+    schedules:
+      - cron: "{{ $EMAIL_PARSE_CRON }}"
+        timezone: "UTC"
+        active: true

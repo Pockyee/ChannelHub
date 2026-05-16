@@ -140,6 +140,86 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4200/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # 一次性任务：创建 process work pool 并把 prefect.yaml 里的 deployment 注册到服务端
+  # ---------------------------------------------------------------------------
+  prefect-deploy:
+    build:
+      context: ./flows
+    container_name: channelhub-prefect-deploy
+    working_dir: /app
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+      PREFECT_CLI_PROMPT: "false"
+      EMAIL_BACKUP_CRON: ${EMAIL_BACKUP_CRON}
+      EMAIL_PARSE_CRON: ${EMAIL_PARSE_CRON}
+    volumes:
+      - ./flows:/app/flows:ro
+      - ./prefect.yaml:/app/prefect.yaml:ro
+    depends_on:
+      prefect:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        prefect work-pool inspect channelhub-pool >/dev/null 2>&1
+        || prefect work-pool create channelhub-pool --type process;
+        prefect deploy --all
+    restart: "no"
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # 常驻 worker：轮询 channelhub-pool，执行邮件备份 flow run
+  # ---------------------------------------------------------------------------
+  prefect-worker:
+    build:
+      context: ./flows
+    container_name: channelhub-prefect-worker
+    working_dir: /app
+    command: prefect worker start --pool channelhub-pool
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+      # flow 运行期读取的邮箱与 MinIO 配置（密钥不进 Prefect 服务端）
+      EMAIL_HOST: ${EMAIL_HOST}
+      EMAIL_PORT: ${EMAIL_PORT}
+      EMAIL_USER: ${EMAIL_USER}
+      EMAIL_PASSWORD: ${EMAIL_PASSWORD}
+      EMAIL_FOLDERS: ${EMAIL_FOLDERS}
+      EMAIL_BACKUP_PREFIX: ${EMAIL_BACKUP_PREFIX}
+      MINIO_ENDPOINT: ${EMAIL_BACKUP_MINIO_ENDPOINT}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ${MINIO_BUCKET}
+      MINIO_SECURE: "false"
+      # 解析 ETL：写 raw.* 用的 Postgres 连接（容器网络内主机名 postgres）
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # 未识别附件告警：经 IONOS SMTP 发给 ALERT_EMAIL_TO
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO}
+    volumes:
+      - ./flows:/app/flows:ro
+    depends_on:
+      prefect-deploy:
+        condition: service_completed_successfully
+    restart: unless-stopped
     networks:
       - channelhub
 

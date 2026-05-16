@@ -1,0 +1,5 @@
+# prefect 已由基础镜像 prefecthq/prefect:3-latest 提供
+# imaplib / email / smtplib / hashlib / json 均为 Python 标准库
+minio>=7.2,<8
+openpyxl>=3.1,<4
+psycopg[binary]>=3.1,<4
