@@ -150,6 +150,31 @@ services:
       - channelhub
 
   # ---------------------------------------------------------------------------
+  # HTTPS 反向代理：用 Caddy 内置自签 CA 给 Prefect UI 套 TLS
+  # 远程机器经明文 http://<LAN-IP>:4200 访问会因「非安全上下文」导致
+  # crypto.randomUUID 抛错、整页白屏；经 https://<PREFECT_PROXY_HOST>
+  # 访问即为 secure context，问题消失。配置见 ./caddy/Caddyfile
+  # ---------------------------------------------------------------------------
+  caddy:
+    image: caddy:2
+    container_name: channelhub-caddy
+    restart: unless-stopped
+    environment:
+      # 浏览器地址栏用的 IP/域名，会写进自签证书 SAN
+      PREFECT_PROXY_HOST: ${PREFECT_PROXY_HOST}
+    ports:
+      - "${PREFECT_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # 自签 CA 与证书，持久化避免重启换 CA
+      - caddy_config:/config
+    depends_on:
+      prefect:
+        condition: service_healthy
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
   # 一次性任务：创建 process work pool 并把 prefect.yaml 里的 deployment 注册到服务端
   # ---------------------------------------------------------------------------
   prefect-deploy:
@@ -228,6 +253,8 @@ volumes:
   pgadmin_data:
   minio_data:
   prefect_data:
+  caddy_data:
+  caddy_config:
 
 networks:
   channelhub:

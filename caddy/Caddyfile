@@ -1,0 +1,24 @@
+# Prefect UI 的 HTTPS 反向代理
+#
+# 背景：浏览器规定 crypto.randomUUID() 只在 secure context 可用
+# （https、或 localhost/127.0.0.1）。远程机器经明文 http://<LAN-IP>:4200
+# 访问时不是 secure context，Prefect 新版 UI 的 csrf.ts 调用 randomUUID
+# 抛错 → 整页白屏。这里用 Caddy 内置自签 CA 给 Prefect 套 TLS，
+# 远程经 https://<PREFECT_PROXY_HOST> 访问即为 secure context，问题消失。
+#
+# PREFECT_PROXY_HOST 由 compose 从 .env 注入（浏览器地址栏用的 IP/域名，
+# 会写进自签证书 SAN）。
+
+{
+	# 只用内置自签 CA 颁发本地证书；绝不联网向 ACME / Let's Encrypt 申请
+	auto_https disable_redirects
+	# 客户端连 IP 时按 RFC 不发 SNI；用此值兜底选证书+匹配站点，
+	# 否则浏览器/curl 访问 https://<IP> 会握手报 tlsv1 internal error
+	default_sni {$PREFECT_PROXY_HOST}
+}
+
+https://{$PREFECT_PROXY_HOST} {
+	tls internal
+	# reverse_proxy 自动处理 WebSocket 升级（Prefect UI 实时事件流需要）
+	reverse_proxy prefect:4200
+}

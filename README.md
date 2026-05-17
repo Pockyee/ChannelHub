@@ -12,7 +12,8 @@ Python 邮件 ETL、Prefect flow 与 Metabase 报表。
 | pgAdmin | `dpage/pgadmin4:latest` | http://localhost:5050 | 数据库可视化管理（已预注册服务器 ChannelHub-PG） |
 | MinIO | `minio/minio:latest` | API http://localhost:9000 / 控制台 http://localhost:9001 | 邮件源文件备份对象存储，桶 `email-archive` |
 | Metabase | `metabase/metabase:latest` | http://localhost:3000 | BI 报表 |
-| Prefect 3 OSS | `prefecthq/prefect:3-latest` | http://localhost:4200 | 任务编排 server |
+| Prefect 3 OSS | `prefecthq/prefect:3-latest` | 本机 http://localhost:4200 ；**远程经 Caddy 用 https** | 任务编排 server |
+| Caddy | `caddy:2` | https://<PREFECT_PROXY_HOST>（默认 https://192.168.178.73） | 给 Prefect UI 套自签 TLS，修复远程白屏（见「故障排查」） |
 
 > 镜像统一用滚动 tag 以保证可拉取；如需可复现环境，请在 `docker-compose.yml`
 > 中固定为具体版本 tag。
@@ -22,7 +23,8 @@ Python 邮件 ETL、Prefect flow 与 Metabase 报表。
 - 已安装 **Docker Engine + Docker Compose 插件**（`docker compose version` 可用）。
   > 本机当前未安装 Docker，需先安装：参见
   > https://docs.docker.com/engine/install/ ，并将当前用户加入 `docker` 组。
-- 端口 `5432 / 5050 / 9000 / 9001 / 3000 / 4200` 未被占用（如冲突见下文「故障排查」）。
+- 端口 `5432 / 5050 / 9000 / 9001 / 3000 / 4200 / 443` 未被占用（如冲突见下文「故障排查」）。
+  > 443 给 Caddy（Prefect HTTPS 反代）；若被占用改 `.env` 的 `PREFECT_HTTPS_PORT`。
 
 ## 快速开始
 
@@ -82,6 +84,16 @@ docker compose down -v               # 连同数据卷一起删除（谨慎，�
   重置：`docker compose down && docker volume rm channelhub_pgadmin_data`。
 - **pgAdmin 启动崩溃 / 无限重启**：新版 pgAdmin 拒绝 `.local` 等保留域名邮箱，
   `PGADMIN_DEFAULT_EMAIL` 必须用正常域名（如 `admin@channelhub.com`）。
+- **远程机器开 Prefect UI 整页白屏（控制台 `crypto.randomUUID is not a function`）**：
+  浏览器规定 `crypto.randomUUID()` 只在 **secure context**（https，或
+  localhost/127.0.0.1）可用。本机 `http://localhost:4200` 正常，但**别的机器经
+  明文 `http://<LAN-IP>:4200` 访问不是 secure context**，新版 UI 的 csrf 代码
+  调 `randomUUID` 抛错 → 白屏。解决：远程一律走 Caddy 的 HTTPS，即
+  **`https://<PREFECT_PROXY_HOST>`**（默认 https://192.168.178.73）。
+  - 自签证书，浏览器首次会提示不安全 → 「高级 / 继续前往」即可。
+  - 改访问 IP/域名：改 `.env` 的 `PREFECT_PROXY_HOST` 后 `docker compose up -d caddy`。
+  - 想换掉自签证书警告：用内网域名 + 受信 CA，或导入 Caddy 的根 CA
+    （`docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./`）。
 - **Prefect 页面报 `Oops. Something went wrong.`**：UI 是 SPA，需用浏览器可达的
   API 地址。compose 已设 `PREFECT_UI_API_URL=/api`（相对路径），无论经 localhost
   还是局域网 IP 访问都能连通。仍报错时**强制刷新浏览器清缓存**（Ctrl+Shift+R），
