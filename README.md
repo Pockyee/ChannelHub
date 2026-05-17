@@ -196,10 +196,36 @@ done
 （默认每小时第 30 分，与备份 `0 * * * *` 错峰）。改频率同邮箱备份方式
 （改 `.env` 后 `docker compose up -d --build --force-recreate prefect-deploy prefect-worker`）。
 
-## 路线图（后续轮次）
+## 可视化（Metabase + 只读角色）
+
+- **只读角色** `bi_readonly`（[db/migrations/004_bi_readonly_role.sql](db/migrations/004_bi_readonly_role.sql)）：
+  仅 `SELECT` raw+core，无写权限。Metabase（及日后 LLM）用它连库，权限隔离。
+  密码不入迁移文件，应用后单独设：
+  ```bash
+  docker compose exec -T postgres psql -U channelhub -d channelhub \
+    -v ON_ERROR_STOP=1 -f - < db/migrations/004_bi_readonly_role.sql
+  docker compose exec -T postgres psql -U channelhub -d channelhub \
+    -c "ALTER ROLE bi_readonly PASSWORD '$BI_READONLY_PASSWORD'"   # 值取自 .env
+  ```
+- **Metabase 自动化** [scripts/metabase_setup.py](scripts/metabase_setup.py)（仅标准库，幂等）：
+  建管理员（凭据见 `.env` 的 `MB_ADMIN_EMAIL/PASSWORD`）→ 用 `bi_readonly` 接
+  `channelhub` 库 → 建 6 个问题 → 组「ChannelHub 概览」仪表盘（库存为主：
+  总件数 / SKU 数 / Top15 门店 / Top15 SKU / 按 ISO 周 / 当前快照明细）。
+  ```bash
+  source .env && docker run --rm --network channelhub_channelhub \
+    -e MB_ADMIN_EMAIL -e MB_ADMIN_PASSWORD \
+    -e BI_READONLY_USER -e BI_READONLY_PASSWORD \
+    -v "$PWD/scripts/metabase_setup.py:/mb.py:ro" \
+    prefecthq/prefect:3-latest python /mb.py
+  ```
+- 访问：http://localhost:3000 （管理员见 `.env`）→ 仪表盘「ChannelHub 概览」。
+  数据走 `bi_readonly` → `core` 视图，永远是去重+规范化后的口径。
+
+## 路线图
 
 1. ~~RAW 层 `raw.sell_through_expert`~~ ✅；后续接入 MSD/Telekom（加 raw 表 + 表头签名）
 2. ~~邮件解析 ETL：.eml → raw.*（带血缘）~~ ✅ 已完成（见「解析 ETL flow」）
 3. ~~Prefect flow：邮件源文件备份到 MinIO~~ ✅ 已完成（见「邮箱备份 flow」）
 4. ~~CORE 规范化 + 去重层（dim/fact 视图）~~ ✅ 已完成（见「数据分层」去重语义）
-5. MART 聚合层 + Metabase 报表与仪表盘
+5. ~~Metabase 报表与仪表盘 + BI 只读角色~~ ✅ 已完成（见「可视化」）
+6. 后续：接入更多供应商；数据量上来后 core/mart 物化为表 + Prefect 刷新；LLM 控图层
