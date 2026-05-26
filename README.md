@@ -141,8 +141,8 @@ ELT 分层（medallion）：
 | 层 | schema | 说明 |
 |---|---|---|
 | RAW | `raw` | 供应商文件**忠实落地**，全 TEXT 不转换，带完整血缘（源邮件/MinIO 对象/行号），可追溯；**不去重**（同文件多发都留，全审计） |
-| CORE | `core` ✅ | 规范化 + **去重**（视图实现）：德式日期→date、量→int、ISO 周；冲突按既定优先级解析 |
-| MART | `mart`（后续） | BI 聚合，供 Metabase |
+| CORE | `core` ✅ | 规范化 + **去重** + **GTIN 白名单过滤**（视图实现，实时）：德式日期→date、量→int、ISO 周；冲突按既定优先级解析；只放行自家 GTIN |
+| MART | `mart` ✅ | 从 core（白名单后）按 **GTIN 粒度**物化为**真实表**（`dim_company`/`dim_store`/`dim_product`/`fact_*`），由 parse flow 末尾 `mart.refresh_all()` 单事务 TRUNCATE+INSERT 重建；Metabase 读此层 |
 
 **冲突解析优先级**（[db/migrations/003_core_conflict_policy.sql](db/migrations/003_core_conflict_policy.sql)，取代 002 视图定义）：
 同一文件发多次 → raw 忠实保留每份（可追溯收到几次）；core 解析冲突的规则：
@@ -159,18 +159,77 @@ ELT 分层（medallion）：
 - `core.fact_sell_through_current` —— **当前库存快照**，每 门店×SKU 取最新
   `transaction_date`（同期取最新报表）→ “当前库存以什么为准”的答案
 - 视图链：`v_sell_through_union`（多供应商扩展点）→ `v_sell_through_keyed`
-  （解析日期/收件序）→ `v_sell_through_dedup` → `dim_*` / 两个 fact（带血缘回溯 raw）
+  （解析日期/收件序）→ **`v_sell_through_whitelisted`（GTIN 白名单卡点）** →
+  `v_sell_through_dedup` → `dim_*` / 两个 fact（带血缘回溯 raw）
 
 迁移脚本放 [db/migrations/](db/migrations/)，文件名带序号；幂等可重复执行。
 应用方式（postgres 卷已初始化，`db/init` 不会再跑，故手动执行）：
 
 ```bash
-# 按序应用全部迁移（幂等，可重复执行；003 取代 002 视图定义）
+# 按序应用全部迁移（幂等，可重复执行；003 取代 002 视图链，005 又取代 003 视图链；
+# 006 在 core 之上新建 mart 物化层，不取代视图链）
 for f in db/migrations/0*.sql; do
   docker compose exec -T postgres psql -U channelhub -d channelhub \
     -v ON_ERROR_STOP=1 -f - < "$f"
 done
 ```
+
+### GTIN 白名单（只放行自家产品）
+
+邮箱报表里混有大量**别人的产品**。按分层约定 raw **忠实保留全部**（审计不动），
+过滤放在 core 的**单一卡点** `core.v_sell_through_whitelisted`：只有 GTIN（归一后）
+命中 `core.gtin_whitelist` 的行才进入 `dedup → dim/fact/current`，BI 自动只看到自家
+产品。删/加一个 GTIN 即从 BI 移除/恢复某产品，**无需回灌 raw 或重跑 ETL**（视图实时）。
+
+- 迁移 [db/migrations/005_core_gtin_whitelist.sql](db/migrations/005_core_gtin_whitelist.sql)
+  （**取代 003 视图链**并注入白名单 JOIN）：建 `core.gtin_whitelist`、归一函数
+  `core.norm_gtin`（去首尾空白/Excel `.0`/空格连字符）、同步函数
+  `core.sync_gtin_whitelist()`、卡点视图，及可见性视图 `core.v_gtin_unmatched`。
+- 白名单**权威源是 CSV**：[db/seed/gtin_whitelist.csv](db/seed/gtin_whitelist.csv)
+  （`gtin,note` 表头，每行一个 GTIN，`note` 可填产品名/负责人，可留空）。版本化、
+  可审阅。编辑后跑装载器同步（CSV 没有的会被删除，其余 upsert）：
+  ```bash
+  # 1) 编辑 db/seed/gtin_whitelist.csv 填入你的 GTIN
+  # 2) 应用迁移（见上方循环，或单独应用 005）
+  # 3) 同步白名单（幂等；空白名单默认中止以防把 core/BI 挡空）
+  bash db/seed/load_gtin_whitelist.sh
+  ```
+- ⚠️ **次序**：白名单为空时 core 会**全空**（一切被挡）。先填 CSV 再跑装载器；
+  装载器在 0 条时会**中止**（确需清空加 `--allow-empty`）。
+- 排查是否漏配自家产品（被挡在外的 GTIN + 名称/行数/最近出现）：
+  ```sql
+  SELECT * FROM core.v_gtin_unmatched ORDER BY raw_rows DESC;
+  ```
+
+### MART 物化层（BI 口径，真实表 + 链式刷新）
+
+数据量上来后，BI 不宜每次直查 core 视图链（每查重算 union→keyed→whitelist→dedup）。
+新增 `mart` schema 把 BI 口径物化为**真实表**，由解析 ETL 末尾链式刷新：
+
+- 迁移 [db/migrations/006_mart_materialized.sql](db/migrations/006_mart_materialized.sql)
+  （**在 core 之上新建，不取代 core 视图链**——与 003/005 不同；core 仍是实时
+  事实源 / 血缘 / GTIN 白名单单一卡点，mart 只是其周期性快照）：建
+  `mart.dim_company` / `mart.dim_store` / `mart.dim_product` /
+  `mart.fact_sell_through` / `mart.fact_sell_through_current` + 刷新函数
+  `mart.refresh_all()`。
+- **键**：门店 = 渠道既定 `(supplier_code, store_id)`；产品 = **归一 GTIN**
+  `gtin_norm`（`core.norm_gtin`，全局一行）；新增**运营公司维**
+  `dim_company (supplier_code, company)`（`company` 为空→`(unknown)`），
+  门店 / 事实回挂公司。
+- **粒度变更（重要）**：mart 事实按 **供应商×周期×日期×门店×GTIN** 去重
+  （core 仍按 `customer_sku_code`，实时不变）。同店同周同 GTIN 若有多个
+  `customer_sku_code`，按既定冲突优先级（最新发来报表）**取一行**——按 GTIN
+  折叠，**不**跨 SKU 码求和（如需合量，把 `refresh_all()` 改为 SUM 聚合）。
+- **刷新**：`mart.refresh_all()` 读 `core.v_sell_through_whitelisted`（白名单后）
+  建临时表 → 单事务 `TRUNCATE`+`INSERT` 重建全部 mart 表（读者只见旧或新，
+  无半态），返回各表行数。**链在 `parse-sell-through` flow 末尾**自动调用
+  （解析入库后立即刷新，与解析同一次运行；无需新增 deployment/定时；即便部分
+  `.eml` 失败，已入库 raw 也会刷新，刷新失败则整体 flow 失败）。
+- `bi_readonly` 已对 `mart` 加只读 + 默认权限；Metabase 改读 `mart.*`。
+- 手动刷新 / 排查：
+  ```sql
+  SELECT * FROM mart.refresh_all();   -- 返回 公司/门店/产品/历史/当前 行数
+  ```
 
 **每供应商一张独立 raw 表**（约定 `raw.sell_through_<供应商>`）：各大渠道 Excel
 列结构不同，每表精确镜像该供应商文件，最忠实可追溯；ETL 按 Excel 表头签名识别
@@ -192,14 +251,15 @@ done
   同一未识别文件只告警一次
 - 新增供应商 = `SUPPLIER_REGISTRY` 加一条表头签名 + 一个 `raw.sell_through_<x>` 表
 
-编排：Prefect deployment **parse-sell-through**，定时 `EMAIL_PARSE_CRON`
-（默认每小时第 30 分，与备份 `0 * * * *` 错峰）。改频率同邮箱备份方式
-（改 `.env` 后 `docker compose up -d --build --force-recreate prefect-deploy prefect-worker`）。
+编排：Prefect deployment **parse-sell-through**，**无独立 cron** —— 由
+**email-backup flow 成功后链式触发**（`run_deployment`，timeout=0 非阻塞），
+保证「备份完立刻解析、解析完立刻刷新 mart」一条链。改 `.env` 的备份 cron 后重新
+注册同邮箱备份方式（`docker compose up -d --build --force-recreate prefect-deploy prefect-worker`）。
 
 ## 可视化（Metabase + 只读角色）
 
 - **只读角色** `bi_readonly`（[db/migrations/004_bi_readonly_role.sql](db/migrations/004_bi_readonly_role.sql)）：
-  仅 `SELECT` raw+core，无写权限。Metabase（及日后 LLM）用它连库，权限隔离。
+  仅 `SELECT` raw+core（006 起含 mart），无写权限。Metabase（及日后 LLM）用它连库，权限隔离。
   密码不入迁移文件，应用后单独设：
   ```bash
   docker compose exec -T postgres psql -U channelhub -d channelhub \
@@ -209,17 +269,22 @@ done
   ```
 - **Metabase 自动化** [scripts/metabase_setup.py](scripts/metabase_setup.py)（仅标准库，幂等）：
   建管理员（凭据见 `.env` 的 `MB_ADMIN_EMAIL/PASSWORD`）→ 用 `bi_readonly` 接
-  `channelhub` 库 → 建 6 个问题 → 组「ChannelHub 概览」仪表盘（库存为主：
-  总件数 / SKU 数 / Top15 门店 / Top15 SKU / 按 ISO 周 / 当前快照明细）。
+  `channelhub` 库 → 建多张问题 → 组 **ChannelHub Overview** 仪表盘
+  （读 `mart.*`，库存为主：总件数 / 产品数(GTIN) / Top15 门店 / 按运营公司 /
+  按 ISO 周 / Top15 产品 / 当前快照明细）。
+  卡片/仪表盘标题与图表列名均为**英文**；脚本按英文名查重，开头会先按已知旧
+  中文名幂等清掉历史中文卡片/仪表盘（DELETE 不支持则归档），重跑即自动迁移。
   ```bash
-  source .env && docker run --rm --network channelhub_channelhub \
-    -e MB_ADMIN_EMAIL -e MB_ADMIN_PASSWORD \
-    -e BI_READONLY_USER -e BI_READONLY_PASSWORD \
+  # 用 docker --env-file 读 .env(字面解析,不要 source：.env 里 CRON 的
+  # "0 * * * *" 未加引号,被 shell 当 glob 会误跑命令;source 也不 export)
+  docker run --rm --network channelhub_channelhub \
+    --env-file .env \
     -v "$PWD/scripts/metabase_setup.py:/mb.py:ro" \
     prefecthq/prefect:3-latest python /mb.py
   ```
-- 访问：http://localhost:3000 （管理员见 `.env`）→ 仪表盘「ChannelHub 概览」。
-  数据走 `bi_readonly` → `core` 视图，永远是去重+规范化后的口径。
+- 访问：http://localhost:3000 （管理员见 `.env`）→ 仪表盘 **ChannelHub Overview**。
+  数据走 `bi_readonly` → `mart` 真实表（按 GTIN 去重+规范化的物化口径，
+  由 parse flow 末尾刷新；core 视图仍可作实时核对）。
 
 ## 路线图
 
@@ -228,4 +293,7 @@ done
 3. ~~Prefect flow：邮件源文件备份到 MinIO~~ ✅ 已完成（见「邮箱备份 flow」）
 4. ~~CORE 规范化 + 去重层（dim/fact 视图）~~ ✅ 已完成（见「数据分层」去重语义）
 5. ~~Metabase 报表与仪表盘 + BI 只读角色~~ ✅ 已完成（见「可视化」）
-6. 后续：接入更多供应商；数据量上来后 core/mart 物化为表 + Prefect 刷新；LLM 控图层
+6. ~~GTIN 白名单：只放行自家产品进 core~~ ✅ 已完成（见「GTIN 白名单」）
+7. ~~mart 物化为真实表（GTIN 粒度 + 运营公司维）+ 解析 flow 末尾链式刷新~~ ✅
+   已完成（见「MART 物化层」）
+8. 后续：接入更多供应商（加 raw 表 + 表头签名，自动并入 core/mart）；LLM 控图层

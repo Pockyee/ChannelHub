@@ -20,6 +20,7 @@ from email.header import decode_header, make_header
 from minio import Minio
 from minio.error import S3Error
 from prefect import flow, get_run_logger, task
+from prefect.deployments import run_deployment
 
 
 def _env(name: str, default: str = "") -> str:
@@ -178,6 +179,20 @@ def email_backup() -> dict:
     if total["failed"]:
         # 让 Prefect UI 标红，但已成功的邮件已落 MinIO，下次幂等续传
         raise RuntimeError(f"{total['failed']} 封邮件备份失败，详见任务日志：{total}")
+
+    # 备份成功后立即触发 parse-sell-through（parse 已无独立 cron，只跟这里跑）。
+    # timeout=0：仅创建 flow run 即返回，不阻塞等 parse 跑完，worker 立刻接走。
+    # 触发失败则让本次 run 标红——备份数据已幂等落 MinIO，下次备份会再次触发。
+    try:
+        pr = run_deployment(
+            name="parse-sell-through/parse-sell-through", timeout=0
+        )
+        logger.info("已触发 parse-sell-through，flow_run_id=%s", pr.id)
+    except Exception as exc:
+        raise RuntimeError(
+            f"备份成功但触发 parse-sell-through 失败：{exc} —— "
+            f"备份数据已在 MinIO，下次备份会重试触发"
+        ) from exc
     return total
 
 

@@ -24,10 +24,10 @@ deployments:
 
   - name: parse-sell-through
     entrypoint: flows/parse_sell_through.py:parse_sell_through
-    description: "MinIO .eml → xlsx → 表头识别 → raw.sell_through_<供应商>；未识别发告警"
+    description: "MinIO .eml → xlsx → 表头识别 → raw.sell_through_<供应商>；未识别发告警；末尾刷新 mart 物化层"
     work_pool:
       name: channelhub-pool
-    schedules:
-      - cron: "{{ $EMAIL_PARSE_CRON }}"
-        timezone: "UTC"
-        active: true
+    # 无独立 cron：由 email-backup flow 成功结束后 run_deployment 触发
+    # （见 flows/email_backup.py）。schedules 显式置空，redeploy 清掉服务端旧排期。
+    # （.env 的 EMAIL_PARSE_CRON 不再被引用，可保留也可删。）
+    schedules: []

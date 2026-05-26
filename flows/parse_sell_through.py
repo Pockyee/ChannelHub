@@ -7,6 +7,8 @@
      · 命中 Expert        → 逐行带血缘 INSERT ON CONFLICT 进 raw.sell_through_expert（幂等）
      · 任何签名都不命中    → 经 SMTP 给 ALERT_EMAIL_TO 发告警（同一文件只告警一次）
 所有取值原样 TEXT 落 raw，不做规范化（解析归一在 core 层）。
+解析入库后**链式刷新 mart 物化层**（mart.refresh_all()：单事务 TRUNCATE+INSERT
+重建 dim_company/dim_store/dim_product/fact_*），保证一解析完 BI 即新鲜。
 """
 
 from __future__ import annotations
@@ -306,6 +308,26 @@ def _maybe_alert(object_key, fn, reason, header_seen, subject, sender, stats, lo
     logger.warning("已发送未识别附件告警: %s", fn)
 
 
+@task(retries=1, retry_delay_seconds=15)
+def refresh_mart() -> dict:
+    """解析入库后链式刷新 mart 物化层（单事务 TRUNCATE+INSERT 重建,返回各表行数）。"""
+    logger = get_run_logger()
+    with _pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT dim_company, dim_store, dim_product, fact, fact_current "
+                "FROM mart.refresh_all()"
+            )
+            r = cur.fetchone()
+        conn.commit()
+    res = {
+        "dim_company": r[0], "dim_store": r[1], "dim_product": r[2],
+        "fact": r[3], "fact_current": r[4],
+    }
+    logger.info("mart 刷新完成: %s", res)
+    return res
+
+
 @flow(name="parse-sell-through")
 def parse_sell_through() -> dict:
     logger = get_run_logger()
@@ -323,9 +345,14 @@ def parse_sell_through() -> dict:
             failed += 1
             logger.warning("处理 %s 失败: %s", k, e)
 
-    logger.info("全部完成: %s, failed=%d", total, failed)
+    logger.info("解析完成: %s, failed=%d", total, failed)
+
+    # 链式刷新 mart：即便部分 .eml 失败,已入库 raw 也应反映到 BI；
+    # 刷新失败 → flow 失败(陈旧 mart 是真问题),解析失败的告警随后再抛。
+    total["mart"] = refresh_mart()
+
     if failed:
-        raise RuntimeError(f"{failed} 个 .eml 处理失败，详见日志；其余已入库: {total}")
+        raise RuntimeError(f"{failed} 个 .eml 处理失败，详见日志；其余已入库并刷新: {total}")
     return total
 
 
