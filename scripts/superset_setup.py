@@ -16,7 +16,12 @@
     -v "$PWD/scripts/superset_setup.py:/ss.py:ro" \\
     prefecthq/prefect:3-latest python /ss.py
 """
-import json, os, sys, urllib.request, urllib.error
+import json, os, sys, http.cookiejar, urllib.request, urllib.error
+
+# 共享 cookie jar:CSRF 是会话型,csrf_token 的 GET 会种 session cookie,
+# 后续写操作必须带回同一 cookie(否则 Superset 报 "CSRF session token is missing")。
+_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 BASE = os.environ.get("SUPERSET_URL", "http://superset:8088").rstrip("/")
 ADMIN_USER = os.environ["SUPERSET_ADMIN_USERNAME"]
@@ -37,7 +42,7 @@ def call(method, path, *, token=None, csrf=None, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as r:
+        with _opener.open(req) as r:
             raw = r.read()
             return r.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:

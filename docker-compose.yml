@@ -207,8 +207,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      # 仅本机回环;外部访问经 Caddy HTTPS(443)反代,或 SSH 隧道
-      - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
+      # 绑定地址可配:默认 127.0.0.1(仅本机回环,服务器走 Caddy HTTPS/SSH 隧道);
+      # 本机要局域网可见时在 .env 设 SUPERSET_BIND=0.0.0.0。
+      - "${SUPERSET_BIND:-127.0.0.1}:${SUPERSET_PORT:-8088}:8088"
     volumes:
       - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
       - superset_data:/app/superset_home

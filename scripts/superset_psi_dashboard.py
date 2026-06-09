@@ -28,7 +28,12 @@
     -v "$PWD/scripts/superset_psi_dashboard.py:/psi.py:ro" \\
     prefecthq/prefect:3-latest python /psi.py
 """
-import json, os, sys, urllib.request, urllib.error
+import json, os, sys, http.cookiejar, urllib.request, urllib.error
+
+# 共享 cookie jar:CSRF 是会话型,csrf_token 的 GET 会种 session cookie,
+# 后续写操作必须带回同一 cookie(否则 Superset 报 "CSRF session token is missing")。
+_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 BASE = os.environ.get("SUPERSET_URL", "http://superset:8088").rstrip("/")
 ADMIN_USER = os.environ["SUPERSET_ADMIN_USERNAME"]
@@ -37,7 +42,7 @@ DB_NAME = "ChannelHub"
 SCHEMA = "mart"
 TABLE = "v_psi"
 DASH_SLUG = "psi"
-DASH_TITLE = "PSI 看板"
+DASH_TITLE = "Expert PSI Dashboard"
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +57,7 @@ def call(method, path, *, token=None, csrf=None, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req) as r:
+        with _opener.open(req) as r:
             raw = r.read()
             return r.status, json.loads(raw) if raw else {}
     except urllib.error.HTTPError as e:
@@ -91,9 +96,9 @@ def m(col, label, agg="SUM"):
     }
 
 
-P = m("purchase_qty", "采购 P")
-S = m("sale_qty", "销售 S")
-I = m("inventory_qty", "库存 I")
+P = m("purchase_qty", "Purchase (P)")
+S = m("sale_qty", "Sale (S)")
+I = m("inventory_qty", "Inventory (I)")
 
 LATEST_FILTER = {  # is_latest = true:产品/门店维“当前库存”只取每店每品最新一期
     "expressionType": "SIMPLE",
@@ -106,7 +111,7 @@ LATEST_FILTER = {  # is_latest = true:产品/门店维“当前库存”只取�
 
 
 def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
-                  x_axis=None, row_limit=None, orderby=None):
+                  x_axis=None, row_limit=None, orderby=None, granularity=None):
     """从 form_data 派生 query_context,使图在看板上无需手动打开即可出数。"""
     q = {
         "filters": [
@@ -126,6 +131,8 @@ def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
     }
     if is_timeseries:
         q["is_timeseries"] = True
+    if granularity:                 # 时序图必须告知 datetime 列,否则后端报缺 dttm
+        q["granularity"] = granularity
     if x_axis:
         q["x_axis"] = x_axis
     return {
@@ -146,13 +153,14 @@ def chart_defs(ds_id):
 
     # A 「PSI 周趋势」折线时序
     a_fd = {**common, "viz_type": "echarts_timeseries_line",
-            "x_axis": "transaction_date", "time_grain_sqla": None,
+            "x_axis": "transaction_date", "granularity_sqla": "transaction_date",
+            "time_grain_sqla": None,
             "metrics": [P, S, I], "groupby": [], "adhoc_filters": [],
             "row_limit": 10000, "x_axis_sort_asc": True,
             "show_legend": True, "markerEnabled": True}
     a_qc = query_context(ds_id, a_fd, columns=["transaction_date"],
                          metrics=[P, S, I], is_timeseries=True,
-                         x_axis="transaction_date",
+                         x_axis="transaction_date", granularity="transaction_date",
                          orderby=[["transaction_date", True]])
 
     # B 「各产品 采购 vs 销售」柱状(类别轴 = 产品)
@@ -178,10 +186,10 @@ def chart_defs(ds_id):
                          orderby=[["transaction_date", True]])
 
     return [
-        ("PSI 周趋势(P/S/I)", "echarts_timeseries_line", a_fd, a_qc),
-        ("各产品 采购 vs 销售", "echarts_timeseries_bar", b_fd, b_qc),
-        ("当前库存(按产品)", "pie", c_fd, c_qc),
-        ("PSI 周明细", "table", d_fd, d_qc),
+        ("PSI Weekly Trend (P/S/I)", "echarts_timeseries_line", a_fd, a_qc),
+        ("Purchase vs Sale by Product", "echarts_timeseries_bar", b_fd, b_qc),
+        ("Current Inventory by Product", "pie", c_fd, c_qc),
+        ("PSI Weekly Detail", "table", d_fd, d_qc),
     ]
 
 
