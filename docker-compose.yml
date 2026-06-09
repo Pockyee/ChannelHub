@@ -160,7 +160,9 @@ services:
   # 跑完即退出;后续 superset 服务依赖它 service_completed_successfully
   # ---------------------------------------------------------------------------
   superset-init:
-    image: apache/superset:4.1.1
+    build:
+      context: ./superset
+    image: channelhub-superset:4.1.1
     container_name: channelhub-superset-init
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
@@ -195,7 +197,9 @@ services:
   # 库(只读角色 bi_readonly),由 scripts/superset_setup.py 注册
   # ---------------------------------------------------------------------------
   superset:
-    image: apache/superset:4.1.1
+    build:
+      context: ./superset
+    image: channelhub-superset:4.1.1
     container_name: channelhub-superset
     restart: unless-stopped
     environment:
