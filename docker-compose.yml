@@ -115,7 +115,8 @@ services:
       MB_DB_USER: ${POSTGRES_USER}
       MB_DB_PASS: ${POSTGRES_PASSWORD}
     ports:
-      - "${METABASE_PORT:-3000}:3000"
+      # 仅本机回环；外部访问经 Caddy HTTPS(443)反代,或 SSH 隧道
+      - "127.0.0.1:${METABASE_PORT:-3000}:3000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -168,15 +169,15 @@ services:
       # 浏览器地址栏用的 IP/域名，会写进自签证书 SAN
       PREFECT_PROXY_HOST: ${PREFECT_PROXY_HOST}
     ports:
-      # 仅本机回环；Prefect 改走 SSH 隧道后,Caddy 反代不再需要公网暴露
-      - "127.0.0.1:${PREFECT_HTTPS_PORT:-443}:443"
+      # 对外 443: Caddy 反代 Metabase,套 HTTPS(自签证书)
+      - "${PREFECT_HTTPS_PORT:-443}:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data      # 自签 CA 与证书，持久化避免重启换 CA
       - caddy_config:/config
     depends_on:
-      prefect:
-        condition: service_healthy
+      metabase:
+        condition: service_started
     networks:
       - channelhub
 
