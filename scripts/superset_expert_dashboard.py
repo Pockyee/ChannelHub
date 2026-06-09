@@ -1,4 +1,4 @@
-"""Superset 一键搭建 PSI 看板(幂等)。
+"""Superset 一键搭建 Expert PSI 看板(幂等)。
 
 前置:
   · db/migrations/007_mart_psi.sql 已应用(存在视图 mart.v_psi)
@@ -11,7 +11,7 @@
        B 「各产品 采购 vs 销售」  柱状      —— 维度=产品,SUM 采购 / 销售
        C 「当前库存(按产品)」    饼图      —— is_latest 过滤,SUM 库存
        D 「PSI 周明细」          表格      —— 按周 SUM 采购/销售/库存
-  3) 组装成看板「PSI 看板」(slug=psi),2×2 布局
+  3) 组装成看板「Expert PSI Dashboard」(slug=psi),2×2 布局
   4) 把 4 张图挂到看板上
 
 口径说明见 db/migrations/007_mart_psi.sql:
@@ -25,8 +25,8 @@
 在 docker 网络内运行:
   docker run --rm --network channelhub_channelhub \\
     --env-file .env \\
-    -v "$PWD/scripts/superset_psi_dashboard.py:/psi.py:ro" \\
-    prefecthq/prefect:3-latest python /psi.py
+    -v "$PWD/scripts/superset_expert_dashboard.py:/dash.py:ro" \\
+    prefecthq/prefect:3-latest python /dash.py
 """
 import json, os, sys, http.cookiejar, urllib.request, urllib.error
 

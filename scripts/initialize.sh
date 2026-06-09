@@ -8,6 +8,7 @@
 #   4) 在 Postgres 建空的 superset 元数据库(若不存在)
 #   5) Metabase 自动化(管理员/接 channelhub 数据源/建仪表盘) — 走 SSH 隧道访问
 #   6) Superset 注册 ChannelHub 数据源                          — 主对外 BI
+#   7) 应用 007 PSI 口径视图 mart.v_psi + 建 Expert PSI 看板    — 主对外 BI
 #
 # 前置:
 #   - docker compose up -d 已跑过,postgres/metabase/superset/superset-init 都健康
@@ -99,14 +100,20 @@ docker run --rm --network "$NET" \
   -v "$REPO_ROOT/scripts/metabase_setup.py:/mb.py:ro" \
   prefecthq/prefect:3-latest python /mb.py
 
-echo "==> 6/6 Superset 注册 ChannelHub 数据源 — 主对外 BI(443)"
+echo "==> 6/7 Superset 注册 ChannelHub 数据源 — 主对外 BI(443)"
 docker run --rm --network "$NET" \
   --env-file .env \
   -v "$REPO_ROOT/scripts/superset_setup.py:/ss.py:ro" \
   prefecthq/prefect:3-latest python /ss.py
 
+echo "==> 7/7 Superset BI 供给(口径视图 + 看板,幂等)"
+# 单一事实源:与 deploy.yml 调的是同一个脚本(应用 BI 视图 + 确保 admin/数据源 +
+# 重跑所有 superset_*_dashboard.py)。本地改看板代码 push 后,deploy 会自动重放。
+bash scripts/superset_provision.sh
+
 echo
 echo "✓ 初始化完成。"
 echo "  · Superset(主 BI):浏览器开 https://<服务器IP> 用 SUPERSET_ADMIN_USERNAME/PASSWORD 登录"
+echo "  · Expert PSI 看板:https://<服务器IP>/superset/dashboard/psi/"
 echo "  · Metabase(备用): SSH 隧道 ssh -L 3000:localhost:3000 deploy@<服务器IP> → http://localhost:3000"
 echo "  · 任一步失败,修复后重跑本脚本即可(全部幂等)。"

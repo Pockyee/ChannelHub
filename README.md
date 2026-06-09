@@ -336,18 +336,48 @@ P 由库存恒等式从相邻两期推出:
   docker compose exec -T postgres psql -U channelhub -d channelhub \
     -v ON_ERROR_STOP=1 -f - < db/migrations/007_mart_psi.sql
   ```
-- **看板搭建** [scripts/superset_psi_dashboard.py](scripts/superset_psi_dashboard.py)(幂等,
+- **看板搭建** [scripts/superset_expert_dashboard.py](scripts/superset_expert_dashboard.py)(幂等,
   存在则更新):注册 `mart.v_psi` 数据集 → 建 4 张图(PSI 周趋势 / 各产品采购 vs 销售 /
   当前库存按产品 / PSI 周明细)→ 组装看板 `PSI 看板`(slug=`psi`)。先跑过
   `superset_setup.py`(需数据源 `ChannelHub`),再:
   ```bash
   docker run --rm --network channelhub_channelhub --env-file .env \
-    -v "$PWD/scripts/superset_psi_dashboard.py:/psi.py:ro" \
-    prefecthq/prefect:3-latest python /psi.py
+    -v "$PWD/scripts/superset_expert_dashboard.py:/dash.py:ro" \
+    prefecthq/prefect:3-latest python /dash.py
   # 完成后访问 https://<服务器IP>/superset/dashboard/psi/
   ```
   > 若某张图首次打开提示无 query context,在 Explore 里点一次 **Run → Save** 即可重建
   > (脚本已写入 `query_context`,正常无需此步)。
+
+### 看板迭代工作流(本地改 → push → 自动上线)
+
+看板呈现是**代码定义、幂等重放**的:你只改本地的 `scripts/superset_*_dashboard.py`(图、
+布局、标题、指标…),push 后由 **deploy 自动重建服务器看板**,不用上服务器跑任何东西。
+
+```
+本地改 superset_expert_dashboard.py  →  git push main
+        │
+        ▼  GitHub Action(.github/workflows/deploy.yml)
+   git pull + docker compose up --build
+        │
+        ▼  bash scripts/superset_provision.sh   ← deploy 自动调用
+   等 Superset 就绪 → 应用 BI 口径视图 → 确保 admin/数据源
+                    → 重跑所有 superset_*_dashboard.py(create-or-update)
+        │
+        ▼  服务器看板即时更新 ✅
+```
+
+- **唯一供给脚本** [scripts/superset_provision.sh](scripts/superset_provision.sh):幂等,被
+  deploy 和 [scripts/initialize.sh](scripts/initialize.sh) 共用(单一事实源)。
+- **加新看板**:在 `scripts/` 下按 `superset_<名字>_dashboard.py` 命名,通配自动纳入,push 即上线。
+- **加新 BI 口径视图**:写成 `CREATE OR REPLACE VIEW` 的迁移,加进 `superset_provision.sh`
+  顶部的 `BI_VIEW_MIGRATIONS` 数组即可(别放会 DROP 重塑 core 视图链的 002/003/005)。
+- **改动是持久的**:看板存 Superset 元数据库、视图存 channelhub 库,都在持久卷里,容器重建不丢。
+- **失败即判部署失败**(`script_stop:true`)——刻意给即时反馈;想"看板脚本出错不挡部署",
+  把 deploy.yml 里那行改成 `bash scripts/superset_provision.sh || true`。
+- ⚠️ 服务器 `.env` **别设** `SUPERSET_BIND=0.0.0.0`(留默认 `127.0.0.1`,走 Caddy HTTPS)。
+
+> 手动单跑(本地或服务器,效果等同 deploy 那步):`bash scripts/superset_provision.sh`
 
 ### Metabase(备用 BI,SSH 隧道)
 

@@ -51,6 +51,14 @@ jobs:
             echo "==> 当前服务状态"
             docker compose ps
 
+            # BI 看板呈现:幂等重放 scripts/superset_*_dashboard.py(等 Superset 就绪 →
+            # 应用口径视图 → 确保 admin/数据源 → create-or-update 全部看板)。
+            # 本地改看板代码 push 后,这一步让服务器看板自动更新,无需上服务器手动跑。
+            # 注:script_stop:true → 看板脚本报错会判部署失败(刻意:给你即时反馈)。
+            # 若想"看板脚本出错不挡部署",把下一行改成:bash scripts/superset_provision.sh || true
+            echo "==> Superset BI 供给(看板自动重放)"
+            bash scripts/superset_provision.sh
+
             echo "==> 健康探测(Prefect API)"
             for i in 1 2 3 4 5 6 7 8 9 10; do
               if docker compose exec -T prefect \
