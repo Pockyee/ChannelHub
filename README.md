@@ -204,7 +204,7 @@ ELT 分层（medallion）：
 
 ```bash
 # 按序应用全部迁移（幂等，可重复执行；003 取代 002 视图链，005 又取代 003 视图链；
-# 006 在 core 之上新建 mart 物化层，不取代视图链）
+# 006 在 core 之上新建 mart 物化层，不取代视图链；007 在 mart 上加 PSI 口径视图 v_psi）
 for f in db/migrations/0*.sql; do
   docker compose exec -T postgres psql -U channelhub -d channelhub \
     -v ON_ERROR_STOP=1 -f - < "$f"
@@ -312,9 +312,42 @@ done
   `.env` 的 `SUPERSET_ADMIN_USERNAME/PASSWORD`)+ `superset init`(加载默认角色权限)。
 - 注册数据源由 [scripts/superset_setup.py](scripts/superset_setup.py) 完成:用 admin 凭据
   登录 → POST `/api/v1/database/` 把 `bi_readonly@postgres/channelhub` 加为 "ChannelHub" 数据源。幂等。
-- 不预建图表与仪表盘 — 主要用 Superset 在于丰富可视化(deck.gl 地图热密度、Sankey、
-  Treemap 等),按需在 UI 或 API 增量建。
+- 不预建大部分图表与仪表盘 — 主要用 Superset 在于丰富可视化(deck.gl 地图热密度、Sankey、
+  Treemap 等),按需在 UI 或 API 增量建。PSI 基础看板是例外,已脚本化(见下)。
 - 访问: `https://<服务器IP>` → 浏览器警告自签证书 → 高级 → 继续 → admin 凭据登录
+
+### PSI 看板(进销存:Purchase / Sale / Inventory)
+
+渠道报表只给**销售 S(门店售出)**和**库存 I(期末在手)**,**没有采购 P**。
+P 由库存恒等式从相邻两期推出:
+
+```
+期末库存 = 期初库存 + 采购 − 销售   ⇒   P = I(本期) − I(上期) + S(本期)
+```
+
+“上期”取同一 (供应商, 门店, GTIN) 上一条有数据的 `transaction_date`(`LAG` 按日期,
+**不假设周连续** —— 报表存在缺周);某店某品的**首期**无上期 → P=NULL(不臆造)。
+
+- **口径视图** [db/migrations/007_mart_psi.sql](db/migrations/007_mart_psi.sql) → `mart.v_psi`:
+  读 `mart.fact_sell_through`(已白名单+按 GTIN 去重),随 `mart.refresh_all()` 自动最新。
+  含 `purchase_qty / sale_qty / inventory_qty`,并带 `is_latest`(每店每品最新一期)——
+  **库存是存量,跨周不可加**,产品/门店维“当前库存”务必用 `is_latest = true` 过滤。
+  ```bash
+  docker compose exec -T postgres psql -U channelhub -d channelhub \
+    -v ON_ERROR_STOP=1 -f - < db/migrations/007_mart_psi.sql
+  ```
+- **看板搭建** [scripts/superset_psi_dashboard.py](scripts/superset_psi_dashboard.py)(幂等,
+  存在则更新):注册 `mart.v_psi` 数据集 → 建 4 张图(PSI 周趋势 / 各产品采购 vs 销售 /
+  当前库存按产品 / PSI 周明细)→ 组装看板 `PSI 看板`(slug=`psi`)。先跑过
+  `superset_setup.py`(需数据源 `ChannelHub`),再:
+  ```bash
+  docker run --rm --network channelhub_channelhub --env-file .env \
+    -v "$PWD/scripts/superset_psi_dashboard.py:/psi.py:ro" \
+    prefecthq/prefect:3-latest python /psi.py
+  # 完成后访问 https://<服务器IP>/superset/dashboard/psi/
+  ```
+  > 若某张图首次打开提示无 query context,在 Explore 里点一次 **Run → Save** 即可重建
+  > (脚本已写入 `query_context`,正常无需此步)。
 
 ### Metabase(备用 BI,SSH 隧道)
 
@@ -336,4 +369,5 @@ done
 6. ~~GTIN 白名单：只放行自家产品进 core~~ ✅ 已完成（见「GTIN 白名单」）
 7. ~~mart 物化为真实表（GTIN 粒度 + 运营公司维）+ 解析 flow 末尾链式刷新~~ ✅
    已完成（见「MART 物化层」）
-8. 后续：接入更多供应商（加 raw 表 + 表头签名，自动并入 core/mart）；LLM 控图层
+8. ~~Superset PSI 看板（P 由库存恒等式从相邻期推出）~~ ✅ 已完成（见「PSI 看板」）
+9. 后续：接入更多供应商（加 raw 表 + 表头签名，自动并入 core/mart）；LLM 控图层
