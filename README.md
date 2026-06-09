@@ -52,6 +52,9 @@ BI 只读角色 `bi_readonly`、GTIN 白名单 seed、Metabase 管理员 + 数�
 依次跑四步,任意一步失败即停下(全部幂等,可重复跑):
 
 1. 按编号顺序应用 `db/migrations/*.sql` — 建 `raw / core / mart` schema 与对象
+   - 注:这些迁移设计为**前向应用一次**(002/003/005 互相重塑同一组视图)。
+     脚本检测到 `core.gtin_whitelist` 存在就跳过本步,认为数据层已初始化。
+     新增迁移(如未来的 007)请手动 `psql -f db/migrations/007_*.sql` 应用。
 2. 用 `.env` 里 `BI_READONLY_PASSWORD` 设 `bi_readonly` 角色密码
 3. 装载 `db/seed/gtin_whitelist.csv` 到 `core.gtin_whitelist`
 4. 调 `scripts/metabase_setup.py` — 建 Metabase 管理员、接 channelhub 数据源、

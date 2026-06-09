@@ -31,17 +31,28 @@ PG_USER="${PG_USER:-channelhub}"
 PG_DB="${PG_DB:-channelhub}"
 
 echo "==> 1/4 应用 db/migrations 全部 .sql"
-shopt -s nullglob
-migrations=(db/migrations/*.sql)
-shopt -u nullglob
-if (( ${#migrations[@]} == 0 )); then
-  echo "  · 无迁移文件,跳过"
+# 这些迁移设计为"前向应用一次":002/003/005 都重塑同一组视图,旧版无法
+# CREATE OR REPLACE 到新结构。所以本步**仅在初始化时**整批跑一遍;
+# 检测到 core.gtin_whitelist 存在即认为已初始化,跳过。
+# 后续新增迁移(如 007+)请手动 psql 应用,或在此脚本里专门加一步。
+ALREADY=$(docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" -tAc \
+  "SELECT 1 FROM information_schema.tables WHERE table_schema='core' AND table_name='gtin_whitelist'" \
+  2>/dev/null | tr -d '[:space:]')
+if [[ "$ALREADY" == "1" ]]; then
+  echo "  · 检测到 core.gtin_whitelist,数据层已初始化,跳过迁移。"
 else
-  for f in "${migrations[@]}"; do
-    echo "  · $(basename "$f")"
-    docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" \
-      -v ON_ERROR_STOP=1 -f - < "$f" >/dev/null
-  done
+  shopt -s nullglob
+  migrations=(db/migrations/*.sql)
+  shopt -u nullglob
+  if (( ${#migrations[@]} == 0 )); then
+    echo "  · 无迁移文件,跳过"
+  else
+    for f in "${migrations[@]}"; do
+      echo "  · $(basename "$f")"
+      docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" \
+        -v ON_ERROR_STOP=1 -f - < "$f" >/dev/null
+    done
+  fi
 fi
 
 echo "==> 2/4 设 bi_readonly 角色密码(取自 .env)"
