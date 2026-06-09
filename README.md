@@ -8,12 +8,13 @@ Python 邮件 ETL、Prefect flow 与 Metabase 报表。
 
 | 服务 | 镜像 | 访问地址 | 用途 |
 |---|---|---|---|
-| PostgreSQL | `postgres:16` | `localhost:5432` | 主业务库 `channelhub` + `metabase` + `prefect` 支撑库（同一实例） |
-| pgAdmin | `dpage/pgadmin4:latest` | http://localhost:5050 | 数据库可视化管理（已预注册服务器 ChannelHub-PG） |
-| MinIO | `minio/minio:latest` | API http://localhost:9000 / 控制台 http://localhost:9001 | 邮件源文件备份对象存储，桶 `email-archive` |
-| Metabase | `metabase/metabase:latest` | http://localhost:3000 | BI 报表 |
-| Prefect 3 OSS | `prefecthq/prefect:3-latest` | 本机 http://localhost:4200 ；**远程经 Caddy 用 https** | 任务编排 server |
-| Caddy | `caddy:2` | https://<PREFECT_PROXY_HOST>（默认 https://192.168.178.73） | 给 Prefect UI 套自签 TLS，修复远程白屏（见「故障排查」） |
+| PostgreSQL | `postgres:16` | `127.0.0.1:5432`(仅本机) | 主业务库 `channelhub` + `metabase` / `prefect` / `superset` 支撑库(同一实例) |
+| pgAdmin | `dpage/pgadmin4:latest` | `127.0.0.1:5050`(仅本机) | 数据库可视化管理(已预注册服务器 ChannelHub-PG) |
+| MinIO | `minio/minio:latest` | `127.0.0.1:9000/9001`(仅本机) | 邮件源文件备份对象存储,桶 `email-archive` |
+| **Superset** | `apache/superset:4.1.1` | **`https://<PREFECT_PROXY_HOST>`(公网,主 BI)** | 主对外 BI 报表 — Caddy 反代 + 自签 HTTPS |
+| Metabase | `metabase/metabase:latest` | `127.0.0.1:3000`(仅本机) | 备用 BI;走 SSH 隧道访问 |
+| Prefect 3 OSS | `prefecthq/prefect:3-latest` | `127.0.0.1:4200`(仅本机) | 任务编排 server;走 SSH 隧道访问(OSS 无认证不可公网暴露) |
+| Caddy | `caddy:2` | `0.0.0.0:443` | HTTPS 反代到 Superset;证书 SAN 写 `PREFECT_PROXY_HOST` |
 
 > 镜像统一用滚动 tag 以保证可拉取；如需可复现环境，请在 `docker-compose.yml`
 > 中固定为具体版本 tag。
@@ -49,7 +50,7 @@ BI 只读角色 `bi_readonly`、GTIN 白名单 seed、Metabase 管理员 + 数�
 
 ### `scripts/initialize.sh` 做了什么
 
-依次跑四步,任意一步失败即停下(全部幂等,可重复跑):
+依次跑六步,任意一步失败即停下(全部幂等,可重复跑):
 
 1. 按编号顺序应用 `db/migrations/*.sql` — 建 `raw / core / mart` schema 与对象
    - 注:这些迁移设计为**前向应用一次**(002/003/005 互相重塑同一组视图)。
@@ -57,8 +58,10 @@ BI 只读角色 `bi_readonly`、GTIN 白名单 seed、Metabase 管理员 + 数�
      新增迁移(如未来的 007)请手动 `psql -f db/migrations/007_*.sql` 应用。
 2. 用 `.env` 里 `BI_READONLY_PASSWORD` 设 `bi_readonly` 角色密码
 3. 装载 `db/seed/gtin_whitelist.csv` 到 `core.gtin_whitelist`
-4. 调 `scripts/metabase_setup.py` — 建 Metabase 管理员、接 channelhub 数据源、
-   建「ChannelHub Overview」仪表盘
+4. 在 Postgres 建空的 `superset` 元数据库(若不存在);superset-init 容器会在里面建 schema
+5. 调 `scripts/metabase_setup.py` — 建 Metabase 管理员、接 channelhub 数据源、
+   建「ChannelHub Overview」仪表盘(走 SSH 隧道使用)
+6. 调 `scripts/superset_setup.py` — Superset 用 admin 凭据注册 ChannelHub 数据源
 
 ### 已经手动 setup 过 Metabase,密码对不上?
 
@@ -290,35 +293,38 @@ done
 保证「备份完立刻解析、解析完立刻刷新 mart」一条链。改 `.env` 的备份 cron 后重新
 注册同邮箱备份方式（`docker compose up -d --build --force-recreate prefect-deploy prefect-worker`）。
 
-## 可视化（Metabase + 只读角色）
+## 可视化（Superset 主对外 + Metabase 备用 + 只读角色）
 
 - **只读角色** `bi_readonly`（[db/migrations/004_bi_readonly_role.sql](db/migrations/004_bi_readonly_role.sql)）：
-  仅 `SELECT` raw+core（006 起含 mart），无写权限。Metabase（及日后 LLM）用它连库，权限隔离。
-  密码不入迁移文件，应用后单独设：
+  仅 `SELECT` raw+core（006 起含 mart），无写权限。Superset / Metabase / 日后 LLM 都用它连库,权限隔离。
+  密码不入迁移文件,应用后单独设(`scripts/initialize.sh` 第 2 步会自动做):
   ```bash
   docker compose exec -T postgres psql -U channelhub -d channelhub \
-    -v ON_ERROR_STOP=1 -f - < db/migrations/004_bi_readonly_role.sql
-  docker compose exec -T postgres psql -U channelhub -d channelhub \
-    -c "ALTER ROLE bi_readonly PASSWORD '$BI_READONLY_PASSWORD'"   # 值取自 .env
+    -v ON_ERROR_STOP=1 -v pw="$BI_READONLY_PASSWORD" <<<"ALTER ROLE bi_readonly PASSWORD :'pw';"
   ```
-- **Metabase 自动化** [scripts/metabase_setup.py](scripts/metabase_setup.py)（仅标准库，幂等）：
-  建管理员（凭据见 `.env` 的 `MB_ADMIN_EMAIL/PASSWORD`）→ 用 `bi_readonly` 接
-  `channelhub` 库 → 建多张问题 → 组 **ChannelHub Overview** 仪表盘
-  （读 `mart.*`，库存为主：总件数 / 产品数(GTIN) / Top15 门店 / 按运营公司 /
-  按 ISO 周 / Top15 产品 / 当前快照明细）。
-  卡片/仪表盘标题与图表列名均为**英文**；脚本按英文名查重，开头会先按已知旧
-  中文名幂等清掉历史中文卡片/仪表盘（DELETE 不支持则归档），重跑即自动迁移。
+
+### Superset(主对外 BI,公网 443)
+
+- 镜像 `apache/superset:4.1.1`,经 Caddy 反代 + 自签 HTTPS 暴露到 443。配置见
+  [superset/superset_config.py](superset/superset_config.py)(元数据库走同 Postgres 的
+  `superset` 库,启 ProxyFix 信任 Caddy 转发头)。
+- 一次性 init 容器 `superset-init` 跑 `superset db upgrade` + `create-admin`(凭据见
+  `.env` 的 `SUPERSET_ADMIN_USERNAME/PASSWORD`)+ `superset init`(加载默认角色权限)。
+- 注册数据源由 [scripts/superset_setup.py](scripts/superset_setup.py) 完成:用 admin 凭据
+  登录 → POST `/api/v1/database/` 把 `bi_readonly@postgres/channelhub` 加为 "ChannelHub" 数据源。幂等。
+- 不预建图表与仪表盘 — 主要用 Superset 在于丰富可视化(deck.gl 地图热密度、Sankey、
+  Treemap 等),按需在 UI 或 API 增量建。
+- 访问: `https://<服务器IP>` → 浏览器警告自签证书 → 高级 → 继续 → admin 凭据登录
+
+### Metabase(备用 BI,SSH 隧道)
+
+- Metabase 仍在跑,端口 `127.0.0.1:3000`,**不**对外。需要时本机开 SSH 隧道:
   ```bash
-  # 用 docker --env-file 读 .env(字面解析,不要 source：.env 里 CRON 的
-  # "0 * * * *" 未加引号,被 shell 当 glob 会误跑命令;source 也不 export)
-  docker run --rm --network channelhub_channelhub \
-    --env-file .env \
-    -v "$PWD/scripts/metabase_setup.py:/mb.py:ro" \
-    prefecthq/prefect:3-latest python /mb.py
+  ssh -N -L 3000:localhost:3000 deploy@<服务器IP>
+  # 浏览器开 http://localhost:3000
   ```
-- 访问：http://localhost:3000 （管理员见 `.env`）→ 仪表盘 **ChannelHub Overview**。
-  数据走 `bi_readonly` → `mart` 真实表（按 GTIN 去重+规范化的物化口径，
-  由 parse flow 末尾刷新；core 视图仍可作实时核对）。
+- 自动化脚本 [scripts/metabase_setup.py](scripts/metabase_setup.py) 仍由 initialize.sh 调用,
+  保留管理员/数据源/Overview 仪表盘已建好的状态。两套 BI 共享同一 Postgres + 同一 `bi_readonly`。
 
 ## 路线图
 

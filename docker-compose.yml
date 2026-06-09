@@ -156,28 +156,92 @@ services:
       - channelhub
 
   # ---------------------------------------------------------------------------
-  # HTTPS 反向代理：用 Caddy 内置自签 CA 给 Prefect UI 套 TLS
-  # 远程机器经明文 http://<LAN-IP>:4200 访问会因「非安全上下文」导致
-  # crypto.randomUUID 抛错、整页白屏；经 https://<PREFECT_PROXY_HOST>
-  # 访问即为 secure context，问题消失。配置见 ./caddy/Caddyfile
+  # Superset 一次性初始化:升级元数据 schema + 建管理员 + 加载内置角色权限
+  # 跑完即退出;后续 superset 服务依赖它 service_completed_successfully
+  # ---------------------------------------------------------------------------
+  superset-init:
+    image: apache/superset:4.1.1
+    container_name: channelhub-superset-init
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL}
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        superset db upgrade &&
+        (superset fab create-admin
+          --username "$$SUPERSET_ADMIN_USERNAME"
+          --firstname Admin --lastname User
+          --email "$$SUPERSET_ADMIN_EMAIL"
+          --password "$$SUPERSET_ADMIN_PASSWORD" || true) &&
+        superset init
+    restart: "no"
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # Superset BI(主对外 BI 工具),经 Caddy 443 公网暴露
+  # 元数据库在同一个 Postgres 实例的 superset 库;数据源连同实例的 channelhub
+  # 库(只读角色 bi_readonly),由 scripts/superset_setup.py 注册
+  # ---------------------------------------------------------------------------
+  superset:
+    image: apache/superset:4.1.1
+    container_name: channelhub-superset
+    restart: unless-stopped
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      # 仅本机回环;外部访问经 Caddy HTTPS(443)反代,或 SSH 隧道
+      - "127.0.0.1:${SUPERSET_PORT:-8088}:8088"
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - superset_data:/app/superset_home
+    depends_on:
+      postgres:
+        condition: service_healthy
+      superset-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8088/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
+  # HTTPS 反向代理:Caddy 用内置自签 CA 给 Superset UI 套 TLS;Prefect 与
+  # Metabase 不对外,走 SSH 隧道访问。证书写入 SAN 的 host 由 .env 的
+  # PREFECT_PROXY_HOST 注入(变量名是历史遗留,语义=Caddy 对外暴露的 host)。
   # ---------------------------------------------------------------------------
   caddy:
     image: caddy:2
     container_name: channelhub-caddy
     restart: unless-stopped
     environment:
-      # 浏览器地址栏用的 IP/域名，会写进自签证书 SAN
       PREFECT_PROXY_HOST: ${PREFECT_PROXY_HOST}
     ports:
-      # 对外 443: Caddy 反代 Metabase,套 HTTPS(自签证书)
       - "${PREFECT_HTTPS_PORT:-443}:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data      # 自签 CA 与证书，持久化避免重启换 CA
+      - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      metabase:
-        condition: service_started
+      superset:
+        condition: service_healthy
     networks:
       - channelhub
 
@@ -262,6 +326,7 @@ volumes:
   prefect_data:
   caddy_data:
   caddy_config:
+  superset_data:
 
 networks:
   channelhub:

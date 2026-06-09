@@ -72,6 +72,8 @@ if [[ ! -f "${ENV_FILE}" ]]; then
   MINIO_PWD=$(openssl rand -hex 24)
   BI_PWD=$(openssl rand -hex 24)
   MB_PWD=$(openssl rand -hex 16)Aa1!
+  SS_SECRET=$(openssl rand -hex 32)
+  SS_PWD=$(openssl rand -hex 16)Aa1!
 
   install -m 0600 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" /dev/null "${ENV_FILE}"
   cat > "${ENV_FILE}" <<EOF
@@ -92,6 +94,12 @@ MINIO_API_PORT=9000
 MINIO_CONSOLE_PORT=9001
 
 METABASE_PORT=3000
+
+SUPERSET_SECRET_KEY=${SS_SECRET}
+SUPERSET_ADMIN_USERNAME=admin
+SUPERSET_ADMIN_EMAIL=admin@channelhub.com
+SUPERSET_ADMIN_PASSWORD=${SS_PWD}
+SUPERSET_PORT=8088
 
 PREFECT_PORT=4200
 PREFECT_PROXY_HOST=CHANGE_ME_PUBLIC_IP_OR_DOMAIN
