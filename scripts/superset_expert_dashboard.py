@@ -6,13 +6,13 @@
 
 做四件事(全部幂等:存在则更新,不存在则创建):
   1) 把 mart.v_psi 注册成 Superset 数据集(主时间列 = transaction_date)
-  2) 建 4 张图:
-       A 「PSI 周趋势(P/S/I)」  折线时序   —— SUM 采购/销售/库存 按周
-       B 「各产品 采购 vs 销售」  柱状      —— 维度=产品,SUM 采购 / 销售
-       C 「当前库存(按产品)」    饼图      —— is_latest 过滤,SUM 库存
-       D 「PSI 周明细」          表格      —— 按周 SUM 采购/销售/库存
+  2) 建 4 张图(产品维以"系列 Z1/Z7/X10"为上层,SKU 颜色变体为下层):
+       A 「PSI Weekly Trend」      折线时序 —— SUM 采购/销售/库存 按周
+       B 「by Series」采购vs销售   柱状     —— 维度=系列,SUM 采购 / 销售
+       C 「Current Inv by Series」 饼图     —— is_latest 过滤,SUM 库存
+       D 「by Series / SKU」       表格     —— 系列→SKU 两层,SUM 采购 / 销售
   3) 组装成看板「Expert PSI Dashboard」(slug=psi),2×2 布局
-  4) 把 4 张图挂到看板上
+  4) 把图挂到看板;并清理被改名/移除的旧图(声明式)
 
 口径说明见 db/migrations/007_mart_psi.sql:
   S=门店售出, I=期末在手库存, P=I本期−I上期+S本期(库存恒等式从相邻期推出)。
@@ -41,6 +41,7 @@ ADMIN_PW = os.environ["SUPERSET_ADMIN_PASSWORD"]
 DB_NAME = "ChannelHub"
 SCHEMA = "mart"
 TABLE = "v_psi"
+TABLE_GEO = "v_psi_bundesland"        # v_psi + bundesland(按州 SO 用)
 DASH_SLUG = "psi"
 DASH_TITLE = "Expert PSI Dashboard"
 
@@ -86,19 +87,22 @@ def list_all(kind, token):
 # ---------------------------------------------------------------------------
 # 指标 / 过滤 / 列 构造(adhoc,免在数据集预建指标)
 # ---------------------------------------------------------------------------
-def m(col, label, agg="SUM"):
+def m(col, label, agg="SUM", opt=None):
     return {
         "expressionType": "SIMPLE",
         "column": {"column_name": col},
         "aggregate": agg,
         "label": label,
-        "optionName": f"metric_{col}_{agg.lower()}",
+        "optionName": opt or f"metric_{col}_{agg.lower()}",
     }
 
 
 P = m("purchase_qty", "Purchase (P)")
 S = m("sale_qty", "Sale (S)")
 I = m("inventory_qty", "Inventory (I)")
+# SO = Sell-Out(售出量),与 S 同列不同标签;按 Bundesland 统计用。store 数 = 去重计数。
+SO = m("sale_qty", "SO (Sell-Out)", opt="metric_so")
+STORES = m("store_id", "Stores", agg="COUNT_DISTINCT", opt="metric_stores")
 
 LATEST_FILTER = {  # is_latest = true:产品/门店维“当前库存”只取每店每品最新一期
     "expressionType": "SIMPLE",
@@ -148,8 +152,9 @@ def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
 # ---------------------------------------------------------------------------
 # 4 张图的 (viz_type, form_data, query_context) 定义
 # ---------------------------------------------------------------------------
-def chart_defs(ds_id):
+def chart_defs(ds_id, ds_geo):
     common = {"datasource": f"{ds_id}__table", "url_params": {}}
+    geo = {"datasource": f"{ds_geo}__table", "url_params": {}}
 
     # A 「PSI 周趋势」折线时序
     a_fd = {**common, "viz_type": "echarts_timeseries_line",
@@ -163,66 +168,80 @@ def chart_defs(ds_id):
                          x_axis="transaction_date", granularity="transaction_date",
                          orderby=[["transaction_date", True]])
 
-    # B 「各产品 采购 vs 销售」柱状(类别轴 = 产品)
+    # B 「各系列 采购 vs 销售」柱状(类别轴 = 系列 Z1/Z7/X10 —— SKU 之上一层)
     b_fd = {**common, "viz_type": "echarts_timeseries_bar",
-            "x_axis": "product_name", "metrics": [P, S], "groupby": [],
+            "x_axis": "product_series", "metrics": [P, S], "groupby": [],
             "adhoc_filters": [], "row_limit": 100, "show_legend": True}
-    b_qc = query_context(ds_id, b_fd, columns=["product_name"], metrics=[P, S],
-                         x_axis="product_name", orderby=[[S, False]])
+    b_qc = query_context(ds_id, b_fd, columns=["product_series"], metrics=[P, S],
+                         x_axis="product_series", orderby=[[S, False]])
 
-    # C 「当前库存(按产品)」饼图,is_latest 过滤
-    c_fd = {**common, "viz_type": "pie", "groupby": ["product_name"],
+    # C 「当前库存(按系列)」饼图,is_latest 过滤
+    c_fd = {**common, "viz_type": "pie", "groupby": ["product_series"],
             "metric": I, "adhoc_filters": [LATEST_FILTER], "row_limit": 100,
             "show_legend": True, "label_type": "key_value"}
-    c_qc = query_context(ds_id, {**c_fd, "metrics": [I]}, columns=["product_name"],
+    c_qc = query_context(ds_id, {**c_fd, "metrics": [I]}, columns=["product_series"],
                          metrics=[I], orderby=[[I, False]])
 
-    # D 「PSI 周明细」表格(按周)
+    # D 「采购/销售 按系列→SKU」表格(显式两层:系列在上,SKU 在下;P/S 为期内合计流量)
     d_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
-            "groupby": ["transaction_date"], "metrics": [P, S, I],
+            "groupby": ["product_series", "product_name"], "metrics": [P, S],
             "adhoc_filters": [], "row_limit": 1000,
-            "order_by_cols": ['["transaction_date", true]']}
-    d_qc = query_context(ds_id, d_fd, columns=["transaction_date"], metrics=[P, S, I],
-                         orderby=[["transaction_date", True]])
+            "order_by_cols": ['["product_series", true]', '["product_name", true]']}
+    d_qc = query_context(ds_id, d_fd, columns=["product_series", "product_name"],
+                         metrics=[P, S], orderby=[[P, False]])
 
+    # E 「SO by Bundesland」表格(按德国联邦州统计 SO=售出量;另 dataset = v_psi_bundesland)
+    e_fd = {**geo, "viz_type": "table", "query_mode": "aggregate",
+            "groupby": ["bundesland"], "metrics": [SO, STORES],
+            "adhoc_filters": [], "row_limit": 50,
+            "order_by_cols": ['["SO (Sell-Out)", false]']}
+    e_qc = query_context(ds_geo, e_fd, columns=["bundesland"], metrics=[SO, STORES],
+                         orderby=[[SO, False]])
+
+    # 每张图带自己的 dataset id(关键:SO 图用 ds_geo,其余用 ds_id)——
+    # slice 的 datasource_id 必须与图内 params/query_context 的 dataset 一致,
+    # 否则看板渲染用 slice 的 dataset 取数 → "Columns missing in dataset"。
     return [
-        ("PSI Weekly Trend (P/S/I)", "echarts_timeseries_line", a_fd, a_qc),
-        ("Purchase vs Sale by Product", "echarts_timeseries_bar", b_fd, b_qc),
-        ("Current Inventory by Product", "pie", c_fd, c_qc),
-        ("PSI Weekly Detail", "table", d_fd, d_qc),
+        ("PSI Weekly Trend (P/S/I)", "echarts_timeseries_line", ds_id, a_fd, a_qc),
+        ("Purchase vs Sale by Series", "echarts_timeseries_bar", ds_id, b_fd, b_qc),
+        ("Current Inventory by Series", "pie", ds_id, c_fd, c_qc),
+        ("Purchase & Sale by Series / SKU", "table", ds_id, d_fd, d_qc),
+        ("SO by Bundesland", "table", ds_geo, e_fd, e_qc),
     ]
 
 
 # ---------------------------------------------------------------------------
-# 看板布局:2×2(每张宽 6 / 高 50)
+# 看板布局:每行 2 张(宽 6);某行只剩 1 张则整行铺满(宽 12)。对任意张数通用。
 # ---------------------------------------------------------------------------
 def position_json(chart_ids, chart_names):
     pos = {
         "DASHBOARD_VERSION_KEY": "v2",
         "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
-        "GRID_ID": {"type": "GRID", "id": "GRID_ID",
-                    "children": ["ROW-1", "ROW-2"], "parents": ["ROOT_ID"]},
         "HEADER_ID": {"type": "HEADER", "id": "HEADER_ID",
                       "meta": {"text": DASH_TITLE}},
     }
-    rows = {"ROW-1": [], "ROW-2": []}
+    n = len(chart_ids)
+    row_ids = []
     for idx, (cid, name) in enumerate(zip(chart_ids, chart_names)):
-        row_id = "ROW-1" if idx < 2 else "ROW-2"
+        row_no = idx // 2
+        row_id = f"ROW-{row_no}"
+        if row_id not in pos:
+            pos[row_id] = {"type": "ROW", "id": row_id, "children": [],
+                           "parents": ["ROOT_ID", "GRID_ID"],
+                           "meta": {"background": "BACKGROUND_TRANSPARENT"}}
+            row_ids.append(row_id)
+        # 该行是否只有这一张(总数为奇数且是最后一张)→ 铺满
+        alone = (idx == n - 1 and idx % 2 == 0)
         comp_id = f"CHART-{idx}"
-        rows[row_id].append(comp_id)
+        pos[row_id]["children"].append(comp_id)
         pos[comp_id] = {
-            "type": "CHART", "id": comp_id,
-            "children": [],
+            "type": "CHART", "id": comp_id, "children": [],
             "parents": ["ROOT_ID", "GRID_ID", row_id],
             "meta": {"chartId": cid, "uuid": None, "sliceName": name,
-                     "width": 6, "height": 50},
+                     "width": 12 if alone else 6, "height": 50},
         }
-    for row_id in ("ROW-1", "ROW-2"):
-        pos[row_id] = {
-            "type": "ROW", "id": row_id, "children": rows[row_id],
-            "parents": ["ROOT_ID", "GRID_ID"],
-            "meta": {"background": "BACKGROUND_TRANSPARENT"},
-        }
+    pos["GRID_ID"] = {"type": "GRID", "id": "GRID_ID",
+                      "children": row_ids, "parents": ["ROOT_ID"]}
     return pos
 
 
@@ -249,32 +268,39 @@ if not db:
 db_id = db["id"]
 print(f"数据源 [{DB_NAME}] id={db_id}")
 
-# 3) 数据集 mart.v_psi(存在则用之,否则创建)
-dsets = list_all("dataset", token)
-ds = next((d for d in dsets
-           if d.get("table_name") == TABLE and (d.get("schema") == SCHEMA)), None)
-if ds:
-    ds_id = ds["id"]
-    print(f"数据集 {SCHEMA}.{TABLE} 已存在 id={ds_id}")
-else:
-    st, j = call("POST", "/api/v1/dataset/", token=token, csrf=csrf, body={
-        "database": db_id, "schema": SCHEMA, "table_name": TABLE})
-    if st not in (200, 201):
-        die(f"创建数据集失败: {st} {j}")
-    ds_id = j["id"]
-    print(f"数据集 {SCHEMA}.{TABLE} 已创建 id={ds_id}")
-# 设主时间列为 transaction_date(时序图按周对齐)
-call("PUT", f"/api/v1/dataset/{ds_id}", token=token, csrf=csrf,
-     body={"main_dttm_col": "transaction_date"})
+# 3) 数据集:mart.v_psi(主)+ mart.v_psi_bundesland(按州 SO);存在则用之,否则创建
+def ensure_dataset(schema, table):
+    ds = next((d for d in list_all("dataset", token)
+               if d.get("table_name") == table and d.get("schema") == schema), None)
+    if ds:
+        ds_id = ds["id"]
+        print(f"数据集 {schema}.{table} 已存在 id={ds_id}")
+    else:
+        st, j = call("POST", "/api/v1/dataset/", token=token, csrf=csrf, body={
+            "database": db_id, "schema": schema, "table_name": table})
+        if st not in (200, 201):
+            die(f"创建数据集 {schema}.{table} 失败: {st} {j}")
+        ds_id = j["id"]
+        print(f"数据集 {schema}.{table} 已创建 id={ds_id}")
+    # 从源同步列(视图改了列才认得;保留 is_dttm 等属性)。幂等且必须,
+    # 否则按新列分组会报 "Columns missing in dataset"。
+    call("PUT", f"/api/v1/dataset/{ds_id}/refresh", token=token, csrf=csrf, body={})
+    # 设主时间列(两个视图都含 transaction_date,时序图按周对齐)
+    call("PUT", f"/api/v1/dataset/{ds_id}", token=token, csrf=csrf,
+         body={"main_dttm_col": "transaction_date"})
+    return ds_id
 
-# 4) 4 张图:存在(同名)则更新,否则创建
+ds_id = ensure_dataset(SCHEMA, TABLE)
+ds_geo = ensure_dataset(SCHEMA, TABLE_GEO)
+
+# 4) 图:存在(同名)则更新,否则创建
 existing_charts = {c["slice_name"]: c["id"] for c in list_all("chart", token)}
 chart_ids, chart_names = [], []
-for name, viz, fd, qc in chart_defs(ds_id):
+for name, viz, chart_ds, fd, qc in chart_defs(ds_id, ds_geo):
     body = {
         "slice_name": name,
         "viz_type": viz,
-        "datasource_id": ds_id,
+        "datasource_id": chart_ds,
         "datasource_type": "table",
         "params": json.dumps(fd, ensure_ascii=False),
         "query_context": json.dumps(qc, ensure_ascii=False),
@@ -296,6 +322,18 @@ for name, viz, fd, qc in chart_defs(ds_id):
 # 5) 看板:存在(同 slug)则更新布局/标题,否则创建
 pos = position_json(chart_ids, chart_names)
 dash = next((d for d in list_all("dashboard", token) if d.get("slug") == DASH_SLUG), None)
+# 记下旧看板里的图 id(用于步骤 7 清理被改名/移除的旧图,避免改名后残留孤图)
+old_chart_ids = set()
+if dash:
+    _, dj = call("GET", f"/api/v1/dashboard/{dash['id']}", token=token)
+    try:
+        oldpos = json.loads((dj.get("result") or {}).get("position_json") or "{}")
+        old_chart_ids = {
+            v["meta"]["chartId"] for v in oldpos.values()
+            if isinstance(v, dict) and v.get("type") == "CHART" and v.get("meta", {}).get("chartId")
+        }
+    except (ValueError, KeyError, TypeError):
+        pass
 dash_body = {
     "dashboard_title": DASH_TITLE,
     "slug": DASH_SLUG,
@@ -314,8 +352,15 @@ if st not in (200, 201):
     die(f"{action}看板失败: {st} {j}")
 print(f"看板 [{DASH_TITLE}] {action} OK id={dash_id} slug={DASH_SLUG}")
 
-# 6) 把 4 张图归属到该看板(看板上才会渲染)
+# 6) 把图归属到该看板(看板上才会渲染)
 for cid in chart_ids:
     call("PUT", f"/api/v1/chart/{cid}", token=token, csrf=csrf,
          body={"dashboards": [dash_id]})
+
+# 7) 清理:旧看板上、本次已不再使用的图(改名/删图后的孤图)一并删除,
+#    让"改代码即所见"——本脚本完全声明式地定义这块看板。
+for cid in old_chart_ids - set(chart_ids):
+    st, _ = call("DELETE", f"/api/v1/chart/{cid}", token=token, csrf=csrf)
+    print(f"清理旧图 id={cid} -> {st}")
+
 print(f"完成:看板 {BASE}/superset/dashboard/{DASH_SLUG}/")

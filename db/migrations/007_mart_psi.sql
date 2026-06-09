@@ -45,6 +45,8 @@ WITH base AS (
         f.stock_on_hand_qty                                       AS inventory_qty,
         -- 上一期期末库存(同 店×品,按日期取上一条有数据的期)
         lag(f.stock_on_hand_qty) OVER w                           AS inventory_prev_qty,
+        -- 上一期的 transaction_date(派生“距上次观测几周”,识别缺周伪峰)
+        lag(f.transaction_date)  OVER w                           AS prev_txn_date,
         -- 标记每个 店×品 的最新一期 → 产品/门店维“当前库存”用它过滤,避免跨周求和
         (f.transaction_date = max(f.transaction_date) OVER w_all) AS is_latest
     FROM mart.fact_sell_through f
@@ -71,7 +73,18 @@ SELECT
     b.sale_qty,
     b.inventory_qty,
     b.inventory_prev_qty,
-    b.is_latest
+    b.is_latest,
+    -- 产品系列(SKU 之上一层):从品名提取型号 token Z1/Z7/X10…(无则归 (other))。
+    -- 看板产品维按它聚合(系列在上),再下钻到 product_name(颜色变体)。
+    -- 注:新列放在末尾,保证 CREATE OR REPLACE VIEW 可幂等重放(中间插列会报错)。
+    coalesce(
+      (regexp_match(coalesce(p.product_name, b.gtin_norm), '([XZ][0-9]{1,2})', 'i'))[1],
+      '(other)'
+    )                                      AS product_series,
+    -- 距上次观测的周数(透明列):首期=NULL;正常连续周=1;缺周>1。
+    -- P 是相邻两快照之差 —— weeks_since_prev>1 的行把多周采购累加在一周(伪峰,如缺 KW15
+    -- 导致的 KW16)。看板可 weeks_since_prev=1 只看干净连续周 P,或据此标记/排除缺周。
+    ((b.transaction_date - b.prev_txn_date) / 7)::int  AS weeks_since_prev
 FROM base b
 LEFT JOIN mart.dim_store   s ON s.supplier_code = b.supplier_code AND s.store_id = b.store_id
 LEFT JOIN mart.dim_product p ON p.gtin_norm    = b.gtin_norm;

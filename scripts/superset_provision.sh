@@ -29,6 +29,13 @@ cd "$REPO_ROOT"
 # 以后新增同类 BI 视图(如 008_mart_xxx.sql 也是 CREATE OR REPLACE),加到这里即可。
 BI_VIEW_MIGRATIONS=(
   db/migrations/007_mart_psi.sql
+  db/migrations/008_geo_plz_bundesland.sql
+)
+
+# 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。
+# 这些是 BI 视图的数据依赖(如 v_psi_bundesland 需要 PLZ→州参照),每次 deploy 重放。
+BI_SEED_LOADERS=(
+  db/seed/load_plz_bundesland.sh
 )
 
 if [[ ! -f .env ]]; then
@@ -58,12 +65,17 @@ for i in $(seq 1 40); do            # 最多 ~120s
 done
 [[ -n "$ready" ]] || { echo "✗ Superset 120s 内未就绪" >&2; docker compose logs --tail=60 superset >&2 || true; exit 1; }
 
-# --- 2) 应用 BI 口径视图(幂等 CREATE OR REPLACE)-----------------------------
-echo "==> [2/4] 应用 BI 口径视图"
+# --- 2) 应用 BI 口径视图(幂等)+ 装载 BI 参照 seed -----------------------------
+echo "==> [2/4] 应用 BI 口径视图 + 参照 seed"
+export POSTGRES_USER="$PG_USER" POSTGRES_DB="$PG_DB"   # 供 loader 内 docker compose exec 用
 for f in "${BI_VIEW_MIGRATIONS[@]}"; do
-  echo "  · $(basename "$f")"
+  echo "  · 视图 $(basename "$f")"
   docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" \
     -v ON_ERROR_STOP=1 -f - < "$f" >/dev/null
+done
+for s in "${BI_SEED_LOADERS[@]}"; do
+  echo "  · seed $(basename "$s")"
+  bash "$s" >/dev/null
 done
 
 # --- 3) 确保 admin + 数据源 ---------------------------------------------------

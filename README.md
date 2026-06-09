@@ -204,7 +204,8 @@ ELT 分层（medallion）：
 
 ```bash
 # 按序应用全部迁移（幂等，可重复执行；003 取代 002 视图链，005 又取代 003 视图链；
-# 006 在 core 之上新建 mart 物化层，不取代视图链；007 在 mart 上加 PSI 口径视图 v_psi）
+# 006 在 core 之上新建 mart 物化层，不取代视图链；007 在 mart 上加 PSI 口径视图 v_psi；
+# 008 加 PLZ→Bundesland 参照 + 按州视图 v_psi_bundesland）
 for f in db/migrations/0*.sql; do
   docker compose exec -T postgres psql -U channelhub -d channelhub \
     -v ON_ERROR_STOP=1 -f - < "$f"
@@ -349,6 +350,22 @@ P 由库存恒等式从相邻两期推出:
   > 若某张图首次打开提示无 query context,在 Explore 里点一次 **Run → Save** 即可重建
   > (脚本已写入 `query_context`,正常无需此步)。
 
+### 按联邦州统计 SO(PLZ → Bundesland)
+
+渠道报表只给门店 PLZ/城市,没有联邦州;德国 PLZ 区(Leitregion)与州界**不重合**
+(同一 2 位前缀常跨 2~3 个州,如 `37` 横跨 Hessen/Thüringen/Niedersachsen/NRW),
+不能按前缀粗判。故用 GeoNames 全量 PLZ→州参照(每 PLZ 取众数州):
+
+- **参照数据** [db/seed/plz_bundesland.csv](db/seed/plz_bundesland.csv)(~10.8k 行,CSV 即权威),
+  由 [db/seed/load_plz_bundesland.sh](db/seed/load_plz_bundesland.sh) 装入 `core.plz_bundesland`。
+  来源 GeoNames `DE.zip`,用 `admin_code1`(数字/字母两套编码都归一)按 PLZ 取众数州 —— 边界
+  门店(如 Bad Mergentheim `97…`→Baden-Württemberg)实测正确。
+- **口径视图** [db/migrations/008_geo_plz_bundesland.sql](db/migrations/008_geo_plz_bundesland.sql)
+  → `mart.v_psi_bundesland`(= `v_psi` + `bundesland`,门店 PLZ 连参照)。
+  **SO(Sell-Out=售出量)按州** = `GROUP BY bundesland, SUM(sale_qty)`。
+- 看板里对应「**SO by Bundesland**」表(各州 SO + 门店数),由看板脚本自动建。
+- 新增门店若 PLZ 不在参照 → `bundesland=(unknown)`(不丢行);补 CSV 后重跑 loader 即可。
+
 ### 看板迭代工作流(本地改 → push → 自动上线)
 
 看板呈现是**代码定义、幂等重放**的:你只改本地的 `scripts/superset_*_dashboard.py`(图、
@@ -372,6 +389,7 @@ P 由库存恒等式从相邻两期推出:
 - **加新看板**:在 `scripts/` 下按 `superset_<名字>_dashboard.py` 命名,通配自动纳入,push 即上线。
 - **加新 BI 口径视图**:写成 `CREATE OR REPLACE VIEW` 的迁移,加进 `superset_provision.sh`
   顶部的 `BI_VIEW_MIGRATIONS` 数组即可(别放会 DROP 重塑 core 视图链的 002/003/005)。
+- **加新 BI 参照 seed**(如 PLZ→州):写个幂等 loader,加进 `BI_SEED_LOADERS` 数组,deploy 自动重放。
 - **改动是持久的**:看板存 Superset 元数据库、视图存 channelhub 库,都在持久卷里,容器重建不丢。
 - **失败即判部署失败**(`script_stop:true`)——刻意给即时反馈;想"看板脚本出错不挡部署",
   把 deploy.yml 里那行改成 `bash scripts/superset_provision.sh || true`。
