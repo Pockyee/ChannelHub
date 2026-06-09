@@ -17,7 +17,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # 仅绑定本机回环；外部访问走 SSH 隧道,避免公网暴露 Postgres
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
       # 首启（空卷）时自动执行：仅创建 metabase / prefect 空支撑库
@@ -43,7 +44,8 @@ services:
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
       PGADMIN_CONFIG_SERVER_MODE: "True"
     ports:
-      - "${PGADMIN_PORT:-5050}:80"
+      # 仅本机回环；外部访问走 SSH 隧道
+      - "127.0.0.1:${PGADMIN_PORT:-5050}:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - ./pgadmin/servers.json:/pgadmin4/servers.json:ro
@@ -65,8 +67,9 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
-      - "${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+      # 仅本机回环；外部访问走 SSH 隧道
+      - "127.0.0.1:${MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${MINIO_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio_data:/data
     networks:
@@ -135,7 +138,8 @@ services:
       PREFECT_UI_API_URL: /api
       PREFECT_SERVER_API_HOST: 0.0.0.0
     ports:
-      - "${PREFECT_PORT:-4200}:4200"
+      # 仅本机回环；外部访问走 SSH 隧道,Prefect OSS 没有内置认证不能公网暴露
+      - "127.0.0.1:${PREFECT_PORT:-4200}:4200"
     volumes:
       - prefect_data:/root/.prefect
     depends_on:
@@ -164,7 +168,8 @@ services:
       # 浏览器地址栏用的 IP/域名，会写进自签证书 SAN
       PREFECT_PROXY_HOST: ${PREFECT_PROXY_HOST}
     ports:
-      - "${PREFECT_HTTPS_PORT:-443}:443"
+      # 仅本机回环；Prefect 改走 SSH 隧道后,Caddy 反代不再需要公网暴露
+      - "127.0.0.1:${PREFECT_HTTPS_PORT:-443}:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data      # 自签 CA 与证书，持久化避免重启换 CA
