@@ -37,10 +37,41 @@ docker compose up -d
 
 # 3. 查看状态（postgres 应为 healthy，minio-init 跑完即 exited 0）
 docker compose ps
+
+# 4. 初始化数据层 + Metabase（幂等，第一次必跑，之后改了迁移/seed 也可再跑）
+bash scripts/initialize.sh
 ```
 
 首启 PostgreSQL 时会自动执行 `db/init/00_create_support_databases.sql`，
-创建 `metabase`、`prefect` 两个**空支撑库**（不含业务表）。
+创建 `metabase`、`prefect` 两个**空支撑库**（不含业务表）。业务表/视图/物化层、
+BI 只读角色 `bi_readonly`、GTIN 白名单 seed、Metabase 管理员 + 数据源 + 仪表盘，
+全部由 `scripts/initialize.sh` 串起来跑一次到位。
+
+### `scripts/initialize.sh` 做了什么
+
+依次跑四步,任意一步失败即停下(全部幂等,可重复跑):
+
+1. 按编号顺序应用 `db/migrations/*.sql` — 建 `raw / core / mart` schema 与对象
+2. 用 `.env` 里 `BI_READONLY_PASSWORD` 设 `bi_readonly` 角色密码
+3. 装载 `db/seed/gtin_whitelist.csv` 到 `core.gtin_whitelist`
+4. 调 `scripts/metabase_setup.py` — 建 Metabase 管理员、接 channelhub 数据源、
+   建「ChannelHub Overview」仪表盘
+
+### 已经手动 setup 过 Metabase,密码对不上?
+
+`scripts/metabase_setup.py` 走的是登录 → 操作 API。如果你之前在浏览器手动跑过
+Metabase 首次 setup 向导，那个时候输的管理员密码会落进 `metabase` 元数据库；
+跟 `.env` 里 `MB_ADMIN_PASSWORD` 不一致就会 401。两种修法:
+
+- 改 `.env` 的 `MB_ADMIN_EMAIL/PASSWORD` 跟当时你手动输的对齐
+- 或清空 Metabase 元数据库重来(数据层 metabase 库,**不**含业务数据):
+  ```bash
+  docker compose stop metabase
+  docker compose exec -T postgres psql -U channelhub -d postgres \
+    -c "DROP DATABASE metabase;" -c "CREATE DATABASE metabase;"
+  docker compose up -d metabase && sleep 30
+  bash scripts/initialize.sh
+  ```
 
 ## 凭据在哪看
 
