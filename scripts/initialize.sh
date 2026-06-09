@@ -50,8 +50,12 @@ if [[ -z "$BI_PWD" ]]; then
   echo "✗ .env 里 BI_READONLY_PASSWORD 为空,无法继续。" >&2
   exit 1
 fi
+# 用 stdin 而不是 -c,因为 psql 的 :'var' 替换只在 stdin/文件读时生效,
+# -c 直接把字符串发给服务器,跳过 psql 客户端层的变量处理。
 docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" \
-  -v pw="$BI_PWD" -c "ALTER ROLE bi_readonly PASSWORD :'pw'" >/dev/null
+  -v ON_ERROR_STOP=1 -v pw="$BI_PWD" <<'SQL' >/dev/null
+ALTER ROLE bi_readonly PASSWORD :'pw';
+SQL
 echo "  · 已设置"
 
 echo "==> 3/4 装载 GTIN 白名单 seed"
