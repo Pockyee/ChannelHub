@@ -36,8 +36,13 @@ jobs:
             echo "==> 检查 .env 是否就位"
             test -f .env || { echo ".env 不存在,部署中止"; exit 1; }
 
-            echo "==> 拉取镜像并重建"
-            docker compose pull
+            echo "==> 重建 / 拉镜像 / 重启"
+            # up -d --build 已经一次性做了三件事:
+            #   1) image: 指公开仓库的 service → 自动 pull
+            #   2) build: 本地 Dockerfile 的 service → 自动 build(--build 强制重建)
+            #   3) 启动 / 更新所有 service
+            # 不再单独 docker compose pull,因为本地 build 的 image tag
+            # (channelhub-superset 等)不在 registry 里,pull 会失败。
             docker compose up -d --build --remove-orphans
 
             echo "==> 清理悬空镜像"
