@@ -170,24 +170,42 @@ def chart_defs(ds_id):
     k3_fd, k3_qc = kpi(AOV)
 
     # A 「周净收入 & 订单」折线时序(order_week 已在视图按周截断)
-    a_fd = {**common, "viz_type": "echarts_timeseries_line",
+    #    Mixed Chart 双 Y 轴:Query A = Revenue(主轴,左) / Query B = Orders(副轴,右),
+    #    营收(€几千)和单数(个位~几十)同轴会把 Orders 压平在 0 线上。
+    a_fd = {**common, "viz_type": "mixed_timeseries",
             "x_axis": "order_week", "granularity_sqla": "order_week",
             "time_grain_sqla": None,
-            "metrics": [REVENUE, ORDERS], "groupby": [], "adhoc_filters": [],
-            "row_limit": 10000, "x_axis_sort_asc": True,
-            "show_legend": True, "markerEnabled": True}
+            "metrics": [REVENUE], "groupby": [], "adhoc_filters": [],
+            "seriesType": "line", "yAxisIndex": 0,
+            "metrics_b": [ORDERS], "groupby_b": [], "adhoc_filters_b": [],
+            "seriesTypeB": "line", "yAxisIndexB": 1,
+            "y_axis_format": "SMART_NUMBER", "y_axis_format_secondary": "SMART_NUMBER",
+            "row_limit": 10000, "row_limit_b": 10000, "x_axis_sort_asc": True,
+            "show_legend": True, "markerEnabled": True, "rich_tooltip": True}
     a_qc = query_context(ds_id, a_fd, columns=["order_week"],
-                         metrics=[REVENUE, ORDERS], is_timeseries=True,
+                         metrics=[REVENUE], is_timeseries=True,
                          x_axis="order_week", granularity="order_week",
                          orderby=[["order_week", True]])
+    a_qc["queries"].append({**a_qc["queries"][0], "metrics": [ORDERS]})
 
-    # B 「各产品 净收入 & 销量」柱状
-    b_fd = {**common, "viz_type": "echarts_timeseries_bar",
-            "x_axis": "product_name", "metrics": [REVENUE, UNITS], "groupby": [],
-            "adhoc_filters": [], "row_limit": 100, "show_legend": True}
+    # B 「各产品 净收入 & 销量」柱状 —— Mixed Chart 双 Y 轴:
+    #    Query A = Revenue(主轴,左) / Query B = Units(副轴,右)。
+    #    金额和件数量级差 ~250 倍,同轴会把 Units 压成看不见的扁条。
+    b_fd = {**common, "viz_type": "mixed_timeseries",
+            "x_axis": "product_name",
+            "metrics": [REVENUE], "groupby": [], "adhoc_filters": [],
+            "seriesType": "bar", "yAxisIndex": 0,
+            "metrics_b": [UNITS], "groupby_b": [], "adhoc_filters_b": [],
+            "seriesTypeB": "bar", "yAxisIndexB": 1,
+            "y_axis_format": "SMART_NUMBER", "y_axis_format_secondary": "SMART_NUMBER",
+            "row_limit": 100, "row_limit_b": 100, "show_legend": True,
+            "rich_tooltip": True}
     b_qc = query_context(ds_id, b_fd, columns=["product_name"],
-                         metrics=[REVENUE, UNITS],
+                         metrics=[REVENUE],
                          x_axis="product_name", orderby=[[REVENUE, False]])
+    # Mixed Chart 取数是两条 query:A=Revenue 之外再补 B=Units
+    b_qc["queries"].append({**b_qc["queries"][0], "metrics": [UNITS],
+                            "orderby": [[UNITS, False]]})
 
     # C 「支付方式订单占比」饼图
     c_fd = {**common, "viz_type": "pie", "groupby": ["payment_method"],
@@ -218,8 +236,8 @@ def chart_defs(ds_id):
         ("Hutt · Total Revenue", "big_number_total", k1_fd, k1_qc),
         ("Hutt · Orders", "big_number_total", k2_fd, k2_qc),
         ("Hutt · Avg Order Value", "big_number_total", k3_fd, k3_qc),
-        ("Weekly Revenue & Orders", "echarts_timeseries_line", a_fd, a_qc),
-        ("Revenue & Units by Product", "echarts_timeseries_bar", b_fd, b_qc),
+        ("Weekly Revenue & Orders", "mixed_timeseries", a_fd, a_qc),
+        ("Revenue & Units by Product", "mixed_timeseries", b_fd, b_qc),
         ("Orders by Payment Method", "pie", c_fd, c_qc),
         ("Revenue by Region", "table", d_fd, d_qc),
         ("Discount Code Performance", "table", e_fd, e_qc),
