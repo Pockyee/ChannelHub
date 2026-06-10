@@ -30,6 +30,7 @@ cd "$REPO_ROOT"
 BI_VIEW_MIGRATIONS=(
   db/migrations/007_mart_psi.sql
   db/migrations/008_geo_plz_bundesland.sql
+  db/migrations/009_mart_hutt_shop.sql
 )
 
 # 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。

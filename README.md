@@ -366,6 +366,35 @@ P 由库存恒等式从相邻两期推出:
 - 看板里对应「**SO by Bundesland**」表(各州 SO + 门店数),由看板脚本自动建。
 - 新增门店若 PLZ 不在参照 → `bundesland=(unknown)`(不丢行);补 CSV 后重跑 loader 即可。
 
+### Hutt Online Shop 看板(自有网店电商)
+
+Hutt 自有 Shopify 网店的订单报表,数据源是邮件 ETL 落进 `raw.sell_through_hutt_shop_de`
+的 Shopify 订单导出(全 text 列,1 行 = 1 订单行项;当前每单恰好 1 行项)。
+
+- **口径视图** [db/migrations/009_mart_hutt_shop.sql](db/migrations/009_mart_hutt_shop.sql)
+  → `mart.v_hutt_shop_orders`:类型化(金额 numeric、时间 timestamptz)+ 清洗
+  (邮编去前导撇号、DE 补足 5 位)。核心口径 **`net_total` = `total` − `refunded_amount`**
+  (净收入,退款即扣);`region` = DE 按 PLZ 映射联邦州(复用 008 的
+  `core.plz_bundesland` 参照),其他国家给国家码。已加入 `BI_VIEW_MIGRATIONS`,
+  deploy 自动重放;本地手动应用:
+  ```bash
+  docker compose exec -T postgres psql -U channelhub -d channelhub \
+    -v ON_ERROR_STOP=1 -f - < db/migrations/009_mart_hutt_shop.sql
+  ```
+- **看板搭建** [scripts/superset_hutt_shop_dashboard.py](scripts/superset_hutt_shop_dashboard.py)
+  (幂等,存在则更新):注册 `mart.v_hutt_shop_orders` 数据集 → 建 8 张图
+  (KPI 大数字×3:净收入/订单数/客单价;周净收入&订单折线;各产品净收入&销量柱状;
+  支付方式饼图;地区净收入表;折扣码表现表)→ 组装看板 `Hutt Online Dashboard`
+  (slug=`hutt-online-shop`)。
+  ```bash
+  docker run --rm --network channelhub_channelhub --env-file .env \
+    -v "$PWD/scripts/superset_hutt_shop_dashboard.py:/dash.py:ro" \
+    prefecthq/prefect:3-latest python /dash.py
+  # 完成后访问 https://<服务器IP>/superset/dashboard/hutt-online-shop/
+  ```
+- 数据出现多行项订单后(Shopify 导出的订单级金额只落首行),需把视图拆成
+  订单层/行项层两个 —— 见 009 迁移头部注释,当前按 YAGNI 未预建。
+
 ### 看板迭代工作流(本地改 → push → 自动上线)
 
 看板呈现是**代码定义、幂等重放**的:你只改本地的 `scripts/superset_*_dashboard.py`(图、
