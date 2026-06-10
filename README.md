@@ -279,15 +279,19 @@ done
 ## 解析 ETL flow（MinIO .eml → raw.sell_through_*）
 
 [flows/parse_sell_through.py](flows/parse_sell_through.py)：扫 MinIO `email-archive`
-所有 `.eml` → 取 `.xlsx` 附件（排除签名内嵌图）→ `openpyxl` 读表头与
-`SUPPLIER_REGISTRY` 表头签名比对：
+所有 `.eml`，按附件扩展名分发到**两条互不纠缠的解析路径**（文件内按
+「共用 / Expert / Hutt / 编排」四段组织）：
 
-- 命中 **Expert** → 逐行带血缘 `INSERT ... ON CONFLICT DO NOTHING` 进
+- `.xlsx` → **Expert 渠道周报**：`openpyxl` 读表头与 `XLSX_REGISTRY` 表头签名
+  比对，命中 → 逐行带血缘 `INSERT ... ON CONFLICT DO NOTHING` 进
   `raw.sell_through_expert`（幂等，取值原样 TEXT，不规范化）
+- `.csv` → **Hutt 网店订单**（Shopify `orders_export_*.csv`）：表头签名命中
+  核心列集（`HUTT_REQUIRED`）→ 同样带血缘幂等入 `raw.sell_through_hutt_shop_de`
+  （79 列映射自动从列名推导，血缘约定 `source_sheet`=文件名、数据行号从 2 起）
 - 任何签名都不命中 → 经 SMTP（`smtp.ionos.de:465` SSL）给 `ALERT_EMAIL_TO`
   （收件人地址配置在 `.env`，不入库）发告警邮件；`raw.ingest_alert` 去重，
   同一未识别文件只告警一次
-- 新增供应商 = `SUPPLIER_REGISTRY` 加一条表头签名 + 一个 `raw.sell_through_<x>` 表
+- 新增 xlsx 供应商 = `XLSX_REGISTRY` 加一条表头签名 + 一个 `raw.sell_through_<x>` 表
 
 编排：Prefect deployment **parse-sell-through**，**无独立 cron** —— 由
 **email-backup flow 成功后链式触发**（`run_deployment`，timeout=0 非阻塞），
