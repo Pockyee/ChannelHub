@@ -228,9 +228,9 @@ services:
       - channelhub
 
   # ---------------------------------------------------------------------------
-  # HTTPS 反向代理:Caddy 用内置自签 CA 给 Superset UI 套 TLS;Prefect 与
-  # Metabase 不对外,走 SSH 隧道访问。证书写入 SAN 的 host 由 .env 的
-  # PREFECT_PROXY_HOST 注入(变量名是历史遗留,语义=Caddy 对外暴露的 host)。
+  # HTTPS 反向代理:Caddy 给 Superset UI 自动申请公网证书;Prefect 与
+  # Metabase 不对外,走 SSH 隧道访问。对外域名由 .env 的 PREFECT_PROXY_HOST
+  # 注入(变量名是历史遗留,语义=Caddy 对外暴露的 host)。
   # ---------------------------------------------------------------------------
   caddy:
     image: caddy:2
@@ -239,6 +239,7 @@ services:
     environment:
       PREFECT_PROXY_HOST: ${PREFECT_PROXY_HOST}
     ports:
+      - "${PREFECT_HTTP_PORT:-80}:80"
       - "${PREFECT_HTTPS_PORT:-443}:443"
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro

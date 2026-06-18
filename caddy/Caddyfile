@@ -1,20 +1,10 @@
-# Caddy 反向代理:把内部 Superset 经 HTTPS 暴露到公网 443
+# Caddy 反向代理:把内部 Superset 经 HTTPS 暴露到公网域名
 #
 # 历史: 这里最初服务 Prefect UI(解决 crypto.randomUUID 白屏),后改服务 Metabase,
 # 现已切到 Superset 为主对外 BI 工具。Prefect 与 Metabase 都走 SSH 隧道访问。
-# 变量名 PREFECT_PROXY_HOST 是历史遗留,语义=Caddy 对外暴露的 host(IP/域名),
-# 同时写进自签证书 SAN。
+# 变量名 PREFECT_PROXY_HOST 是历史遗留,语义=Caddy 对外暴露的域名。
 
-{
-	# 只用内置自签 CA 颁发本地证书；绝不联网向 ACME / Let's Encrypt 申请
-	auto_https disable_redirects
-	# 客户端连 IP 时按 RFC 不发 SNI；用此值兜底选证书+匹配站点，
-	# 否则浏览器/curl 访问 https://<IP> 会握手报 tlsv1 internal error
-	default_sni {$PREFECT_PROXY_HOST}
-}
-
-https://{$PREFECT_PROXY_HOST} {
-	tls internal
+{$PREFECT_PROXY_HOST} {
 	# 反代 Superset(同 docker 网络,主机名 superset,容器端口 8088)
 	# Caddy 自动转发 WebSocket 升级 + 设置 X-Forwarded-*
 	reverse_proxy superset:8088

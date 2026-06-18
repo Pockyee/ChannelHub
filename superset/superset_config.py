@@ -18,6 +18,7 @@ SQLALCHEMY_DATABASE_URI = (
 
 # 在 Caddy 反代后面运行 — 让 Superset 信任 X-Forwarded-* 头
 ENABLE_PROXY_FIX = True
+PREFERRED_URL_SCHEME = "https"
 
 # 关掉 Superset 自带的示例数据;我们只关心 ChannelHub 这个数据源
 SUPERSET_LOAD_EXAMPLES = False
