@@ -209,7 +209,7 @@ def chart_defs(ds_id, ds_geo):
             "column_config": {"DOS (days, 4-week demand)": {"d3NumberFormat": ",.1f"}},
             "order_by_cols": ['["DOS (days, 4-week demand)", true']}
     e_qc = query_context(ds_id, e_fd, columns=["sku"], metrics=[DOS, I, S_4W],
-                         orderby=[[DOS, True]])
+                         orderby=[["DOS (days, 4-week demand)", True]])
 
     # F 「销售 按系列→SKU」表格(显式两层:系列在上,SKU 在下)。
     f_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
