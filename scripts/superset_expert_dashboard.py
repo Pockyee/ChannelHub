@@ -112,8 +112,8 @@ DOS = {
     "optionName": "metric_dos_days_4w",
     "d3format": ",.1f",
 }
-# SO = Sell-Out(售出量),与 S 同列不同标签;按 Bundesland 统计用。store 数 = 去重计数。
-SO = m("sale_qty", "SO (Sell-Out)", opt="metric_so")
+# Sale(售出量)：按 Bundesland 统计时也使用与其余图一致的 Sale 标签。
+SALE_BY_STATE = m("sale_qty", "Sale (S)", opt="metric_sale_by_state")
 STORES = m("store_id", "Stores", agg="COUNT_DISTINCT", opt="metric_stores")
 
 LATEST_FILTER = {  # is_latest = true:产品/门店维“当前库存”只取每店每品最新一期
@@ -219,13 +219,13 @@ def chart_defs(ds_id, ds_geo):
     f_qc = query_context(ds_id, f_fd, columns=["product_series", "sku"],
                          metrics=[S], orderby=[["sku", True]])
 
-    # G 「SO by Bundesland」表格(按德国联邦州统计 SO=售出量;另 dataset = v_psi_bundesland)
+    # G 「Sale by Bundesland」表格(按德国联邦州统计 Sale;另 dataset = v_psi_bundesland)
     g_fd = {**geo, "viz_type": "table", "query_mode": "aggregate",
-            "groupby": ["bundesland"], "metrics": [SO, STORES],
+            "groupby": ["bundesland"], "metrics": [SALE_BY_STATE, STORES],
             "adhoc_filters": [], "row_limit": 50,
-            "order_by_cols": ['["SO (Sell-Out)", false]']}
-    g_qc = query_context(ds_geo, g_fd, columns=["bundesland"], metrics=[SO, STORES],
-                         orderby=[[SO, False]])
+            "order_by_cols": ['["Sale (S)", false]']}
+    g_qc = query_context(ds_geo, g_fd, columns=["bundesland"], metrics=[SALE_BY_STATE, STORES],
+                         orderby=[[SALE_BY_STATE, False]])
 
     # 每张图带自己的 dataset id(关键:SO 图用 ds_geo,其余用 ds_id)——
     # slice 的 datasource_id 必须与图内 params/query_context 的 dataset 一致,
@@ -237,7 +237,7 @@ def chart_defs(ds_id, ds_geo):
         ("DOS (days, 4-week demand)", "big_number_total", ds_id, d_fd, d_qc),
         ("DOS by SKU (4-week demand)", "table", ds_id, e_fd, e_qc),
         ("Sale by Series / SKU", "table", ds_id, f_fd, f_qc),
-        ("SO by Bundesland", "table", ds_geo, g_fd, g_qc),
+        ("Sale by Bundesland", "table", ds_geo, g_fd, g_qc),
     ]
 
 
@@ -368,6 +368,10 @@ ds_geo = ensure_dataset(SCHEMA, TABLE_GEO)
 
 # 4) 图:存在(同名)则更新,否则创建
 existing_charts = {c["slice_name"]: c["id"] for c in list_all("chart", token)}
+# 图表改名时复用原 ID，保留既有 Explore/分享链接。
+for old_name, new_name in {"SO by Bundesland": "Sale by Bundesland"}.items():
+    if new_name not in existing_charts and old_name in existing_charts:
+        existing_charts[new_name] = existing_charts[old_name]
 chart_ids, chart_names = [], []
 for name, viz, chart_ds, fd, qc in chart_defs(ds_id, ds_geo):
     body = {

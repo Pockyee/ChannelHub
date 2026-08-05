@@ -345,7 +345,7 @@ P 由库存恒等式从相邻两期推出:
   ```
 - **看板搭建** [scripts/superset_expert_dashboard.py](scripts/superset_expert_dashboard.py)(幂等,
   存在则更新):注册 `mart.v_psi` 数据集 → 建 7 张图(Sale/Inventory 周趋势 / 各产品销售 /
-  当前库存按产品 / DOS KPI / SKU DOS 表 / SKU 销售明细 / SO by Bundesland)→
+  当前库存按产品 / DOS KPI / SKU DOS 表 / SKU 销售明细 / Sale by Bundesland)→
   组装看板 `PSI 看板`(slug=`psi`)；顶部提供 **Company → SKU** 级联筛选：
   选 company、不选 SKU 即看该 company 全部 SKU，继续选 SKU 即看单品。先跑过
   `superset_setup.py`(需数据源 `ChannelHub`),再:
@@ -371,7 +371,7 @@ P 由库存恒等式从相邻两期推出:
 - **口径视图** [db/migrations/008_geo_plz_bundesland.sql](db/migrations/008_geo_plz_bundesland.sql)
   → `mart.v_psi_bundesland`(= `v_psi` + `bundesland`,门店 PLZ 连参照)。
   **SO(Sell-Out=售出量)按州** = `GROUP BY bundesland, SUM(sale_qty)`。
-- 看板里对应「**SO by Bundesland**」表(各州 SO + 门店数),由看板脚本自动建。
+- 看板里对应「**Sale by Bundesland**」表(各州 Sale + 门店数),由看板脚本自动建。
 - 新增门店若 PLZ 不在参照 → `bundesland=(unknown)`(不丢行);补 CSV 后重跑 loader 即可。
 
 ### Hutt Online Shop 看板(自有网店电商)
