@@ -337,13 +337,17 @@ P 由库存恒等式从相邻两期推出:
   读 `mart.fact_sell_through`(已白名单+按 GTIN 去重),随 `mart.refresh_all()` 自动最新。
   含 `purchase_qty / sale_qty / inventory_qty`,并带 `is_latest`(每店每品最新一期)——
   **库存是存量,跨周不可加**,产品/门店维“当前库存”务必用 `is_latest = true` 过滤。
+  另含 `sku`(SKU 编码 + 品名)和 `sale_qty_last_4w`；DOS 使用
+  `SUM(当前库存) × 28 / SUM(最近4周销量)`，分母为 0 时为空。
   ```bash
   docker compose exec -T postgres psql -U channelhub -d channelhub \
     -v ON_ERROR_STOP=1 -f - < db/migrations/007_mart_psi.sql
   ```
 - **看板搭建** [scripts/superset_expert_dashboard.py](scripts/superset_expert_dashboard.py)(幂等,
-  存在则更新):注册 `mart.v_psi` 数据集 → 建 4 张图(PSI 周趋势 / 各产品采购 vs 销售 /
-  当前库存按产品 / PSI 周明细)→ 组装看板 `PSI 看板`(slug=`psi`)。先跑过
+  存在则更新):注册 `mart.v_psi` 数据集 → 建 7 张图(Sale/Inventory 周趋势 / 各产品销售 /
+  当前库存按产品 / DOS KPI / SKU DOS 表 / SKU 销售明细 / SO by Bundesland)→
+  组装看板 `PSI 看板`(slug=`psi`)；顶部提供 **Company → SKU** 级联筛选：
+  选 company、不选 SKU 即看该 company 全部 SKU，继续选 SKU 即看单品。先跑过
   `superset_setup.py`(需数据源 `ChannelHub`),再:
   ```bash
   docker run --rm --network channelhub_channelhub --env-file .env \

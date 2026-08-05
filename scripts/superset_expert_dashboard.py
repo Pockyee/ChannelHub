@@ -6,12 +6,14 @@
 
 做四件事(全部幂等:存在则更新,不存在则创建):
   1) 把 mart.v_psi 注册成 Superset 数据集(主时间列 = transaction_date)
-  2) 建 4 张图(产品维以"系列 Z1/Z7/X10"为上层,SKU 颜色变体为下层):
-       A 「PSI Weekly Trend」      折线时序 —— SUM 采购/销售/库存 按周
-       B 「by Series」采购vs销售   柱状     —— 维度=系列,SUM 采购 / 销售
+  2) 建 6 张图(产品维以"系列 Z1/Z7/X10"为上层,SKU 颜色变体为下层):
+       A 「SI Weekly Trend」       折线时序 —— SUM 销售/库存 按周
+       B 「Sale by Series」        柱状     —— 维度=系列,SUM 销售
        C 「Current Inv by Series」 饼图     —— is_latest 过滤,SUM 库存
-       D 「by Series / SKU」       表格     —— 系列→SKU 两层,SUM 采购 / 销售
-  3) 组装成看板「Expert PSI Dashboard」(slug=psi),2×2 布局
+       D 「DOS (4-week demand)」  大数字   —— 当前库存可供应天数
+       E 「DOS by SKU」            表格     —— DOS / 当前库存 / 最近四周销售
+       F 「Sale by Series / SKU」  表格     —— 系列→SKU 两层,SUM 销售
+  3) 组装成看板「Expert PSI Dashboard」(slug=psi),并提供 Company → SKU 联动筛选
   4) 把图挂到看板;并清理被改名/移除的旧图(声明式)
 
 口径说明见 db/migrations/007_mart_psi.sql:
@@ -97,9 +99,18 @@ def m(col, label, agg="SUM", opt=None):
     }
 
 
-P = m("purchase_qty", "Purchase (P)")
 S = m("sale_qty", "Sale (S)")
 I = m("inventory_qty", "Inventory (I)")
+S_4W = m("sale_qty_last_4w", "Sale (last 4 weeks)", opt="metric_sale_last_4w")
+# DOS = 当前库存 / 最近 4 周平均周销量 × 7 = 库存 × 28 / 最近 4 周销量。
+# 此 SQL 指标仅配合 LATEST_FILTER 使用；筛选后在聚合层计算，避免平均各 SKU
+# 的 DOS 而造成加权错误。销量为 0 时返回 NULL，UI 显示为空而非虚假的无限大。
+DOS = {
+    "expressionType": "SQL",
+    "sqlExpression": "SUM(inventory_qty) * 28.0 / NULLIF(SUM(sale_qty_last_4w), 0)",
+    "label": "DOS (days, 4-week demand)",
+    "optionName": "metric_dos_days_4w",
+}
 # SO = Sell-Out(售出量),与 S 同列不同标签;按 Bundesland 统计用。store 数 = 去重计数。
 SO = m("sale_qty", "SO (Sell-Out)", opt="metric_so")
 STORES = m("store_id", "Stores", agg="COUNT_DISTINCT", opt="metric_stores")
@@ -150,29 +161,29 @@ def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
 
 
 # ---------------------------------------------------------------------------
-# 4 张图的 (viz_type, form_data, query_context) 定义
+# 7 张图的 (viz_type, form_data, query_context) 定义
 # ---------------------------------------------------------------------------
 def chart_defs(ds_id, ds_geo):
     common = {"datasource": f"{ds_id}__table", "url_params": {}}
     geo = {"datasource": f"{ds_geo}__table", "url_params": {}}
 
-    # A 「PSI 周趋势」折线时序
+    # A 「SI 周趋势」折线时序（Purchase 口径暂不展示）
     a_fd = {**common, "viz_type": "echarts_timeseries_line",
             "x_axis": "transaction_date", "granularity_sqla": "transaction_date",
             "time_grain_sqla": None,
-            "metrics": [P, S, I], "groupby": [], "adhoc_filters": [],
+            "metrics": [S, I], "groupby": [], "adhoc_filters": [],
             "row_limit": 10000, "x_axis_sort_asc": True,
             "show_legend": True, "markerEnabled": True}
     a_qc = query_context(ds_id, a_fd, columns=["transaction_date"],
-                         metrics=[P, S, I], is_timeseries=True,
+                         metrics=[S, I], is_timeseries=True,
                          x_axis="transaction_date", granularity="transaction_date",
                          orderby=[["transaction_date", True]])
 
-    # B 「各系列 采购 vs 销售」柱状(类别轴 = 系列 Z1/Z7/X10 —— SKU 之上一层)
+    # B 「各系列销售」柱状(类别轴 = 系列 Z1/Z7/X10 —— SKU 之上一层)
     b_fd = {**common, "viz_type": "echarts_timeseries_bar",
-            "x_axis": "product_series", "metrics": [P, S], "groupby": [],
+            "x_axis": "product_series", "metrics": [S], "groupby": [],
             "adhoc_filters": [], "row_limit": 100, "show_legend": True}
-    b_qc = query_context(ds_id, b_fd, columns=["product_series"], metrics=[P, S],
+    b_qc = query_context(ds_id, b_fd, columns=["product_series"], metrics=[S],
                          x_axis="product_series", orderby=[[S, False]])
 
     # C 「当前库存(按系列)」饼图,is_latest 过滤
@@ -182,31 +193,49 @@ def chart_defs(ds_id, ds_geo):
     c_qc = query_context(ds_id, {**c_fd, "metrics": [I]}, columns=["product_series"],
                          metrics=[I], orderby=[[I, False]])
 
-    # D 「采购/销售 按系列→SKU」表格(显式两层:系列在上,SKU 在下;P/S 为期内合计流量)
-    d_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
-            "groupby": ["product_series", "product_name"], "metrics": [P, S],
+    # D 「DOS」KPI：只取每店每 SKU 的当前快照；筛选后的总库存/总需求正确加权。
+    d_fd = {**common, "viz_type": "big_number_total", "metric": DOS,
+            "adhoc_filters": [LATEST_FILTER], "header_font_size": 0.4,
+            "subheader_font_size": 0.15, "y_axis_format": ",.1f",
+            "time_format": "smart_date"}
+    d_qc = query_context(ds_id, {**d_fd, "metrics": [DOS]}, columns=[],
+                         metrics=[DOS], orderby=[])
+
+    # E 「各 SKU DOS」：未选择 SKU 时可比较公司内所有 SKU；选择后则显示单 SKU。
+    e_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
+            "groupby": ["sku"], "metrics": [DOS, I, S_4W], "adhoc_filters": [LATEST_FILTER],
+            "row_limit": 1000,
+            "order_by_cols": ['["DOS (days, 4-week demand)", true]']}
+    e_qc = query_context(ds_id, e_fd, columns=["sku"], metrics=[DOS, I, S_4W],
+                         orderby=[[DOS, True]])
+
+    # F 「销售 按系列→SKU」表格(显式两层:系列在上,SKU 在下)。
+    f_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
+            "groupby": ["product_series", "product_name"], "metrics": [S],
             "adhoc_filters": [], "row_limit": 1000,
             "order_by_cols": ['["product_series", true]', '["product_name", true]']}
-    d_qc = query_context(ds_id, d_fd, columns=["product_series", "product_name"],
-                         metrics=[P, S], orderby=[[P, False]])
+    f_qc = query_context(ds_id, f_fd, columns=["product_series", "product_name"],
+                         metrics=[S], orderby=[[S, False]])
 
-    # E 「SO by Bundesland」表格(按德国联邦州统计 SO=售出量;另 dataset = v_psi_bundesland)
-    e_fd = {**geo, "viz_type": "table", "query_mode": "aggregate",
+    # G 「SO by Bundesland」表格(按德国联邦州统计 SO=售出量;另 dataset = v_psi_bundesland)
+    g_fd = {**geo, "viz_type": "table", "query_mode": "aggregate",
             "groupby": ["bundesland"], "metrics": [SO, STORES],
             "adhoc_filters": [], "row_limit": 50,
             "order_by_cols": ['["SO (Sell-Out)", false]']}
-    e_qc = query_context(ds_geo, e_fd, columns=["bundesland"], metrics=[SO, STORES],
+    g_qc = query_context(ds_geo, g_fd, columns=["bundesland"], metrics=[SO, STORES],
                          orderby=[[SO, False]])
 
     # 每张图带自己的 dataset id(关键:SO 图用 ds_geo,其余用 ds_id)——
     # slice 的 datasource_id 必须与图内 params/query_context 的 dataset 一致,
     # 否则看板渲染用 slice 的 dataset 取数 → "Columns missing in dataset"。
     return [
-        ("PSI Weekly Trend (P/S/I)", "echarts_timeseries_line", ds_id, a_fd, a_qc),
-        ("Purchase vs Sale by Series", "echarts_timeseries_bar", ds_id, b_fd, b_qc),
+        ("Expert Overall – Weekly Sale & Inventory", "echarts_timeseries_line", ds_id, a_fd, a_qc),
+        ("Sale by Series", "echarts_timeseries_bar", ds_id, b_fd, b_qc),
         ("Current Inventory by Series", "pie", ds_id, c_fd, c_qc),
-        ("Purchase & Sale by Series / SKU", "table", ds_id, d_fd, d_qc),
-        ("SO by Bundesland", "table", ds_geo, e_fd, e_qc),
+        ("DOS (days, 4-week demand)", "big_number_total", ds_id, d_fd, d_qc),
+        ("DOS by SKU (4-week demand)", "table", ds_id, e_fd, e_qc),
+        ("Sale by Series / SKU", "table", ds_id, f_fd, f_qc),
+        ("SO by Bundesland", "table", ds_geo, g_fd, g_qc),
     ]
 
 
@@ -243,6 +272,45 @@ def position_json(chart_ids, chart_names):
     pos["GRID_ID"] = {"type": "GRID", "id": "GRID_ID",
                       "children": row_ids, "parents": ["ROOT_ID"]}
     return pos
+
+
+def native_filter_configuration(ds_id, chart_ids):
+    """Company → SKU 级联筛选，作用于本 PSI 数据集的全部 PSI 图。
+
+    company 先选后，SKU 下拉只显示该公司实际拥有的产品名称；不选 SKU 时，所有
+    图即展示该 company 的全部 SKU 汇总。州图来自另一个数据集，故刻意不纳入范围。
+    """
+    psi_chart_ids = chart_ids[:-1]
+    return [
+        {
+            "id": "NATIVE_FILTER-company",
+            "name": "Company",
+            "filterType": "filter_select",
+            "targets": [{"datasetId": ds_id, "column": {"name": "company"}}],
+            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
+            "cascadeParentIds": [],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "chartsInScope": psi_chart_ids,
+            "tabsInScope": [],
+            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
+                              "searchAllOptions": False, "inverseSelection": False},
+        },
+        {
+            "id": "NATIVE_FILTER-sku",
+            "name": "SKU",
+            "filterType": "filter_select",
+            "targets": [{"datasetId": ds_id, "column": {"name": "product_name"}}],
+            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
+            "cascadeParentIds": ["NATIVE_FILTER-company"],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "chartsInScope": psi_chart_ids,
+            "tabsInScope": [],
+            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
+                              "searchAllOptions": False, "inverseSelection": False},
+        },
+    ]
 
 
 # ===========================================================================
@@ -339,6 +407,9 @@ dash_body = {
     "slug": DASH_SLUG,
     "published": True,
     "position_json": json.dumps(pos, ensure_ascii=False),
+    "json_metadata": json.dumps({
+        "native_filter_configuration": native_filter_configuration(ds_id, chart_ids),
+    }, ensure_ascii=False),
 }
 if dash:
     dash_id = dash["id"]

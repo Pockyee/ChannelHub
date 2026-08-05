@@ -21,6 +21,10 @@
 --         但**跨周相加无意义**。按产品/门店做“当前库存”请用 is_latest 过滤,
 --         看板里产品/门店维的库存图都加 is_latest = true。
 --   · P 可为负:渠道退货 / 库存被更正调低 / 跨缺口周累计,均属正常,保留原值。
+--   · DOS(库存供应天数)的分母使用每个 门店×SKU 最新快照日前 4 周(28 天)的
+--     销量；看板只在 is_latest=true 的行上计算:
+--          DOS = SUM(当前库存) × 28 / SUM(最近4周销量)
+--     因此 company/SKU 筛选后仍是正确的加权汇总，而不是逐 SKU DOS 的平均值。
 --   · 读 mart.fact_sell_through(已白名单 + 按归一 GTIN 去重的历史事实),
 --     故本视图随 mart.refresh_all() 刷新而最新;无需自身编排。
 --
@@ -48,12 +52,23 @@ WITH base AS (
         -- 上一期的 transaction_date(派生“距上次观测几周”,识别缺周伪峰)
         lag(f.transaction_date)  OVER w                           AS prev_txn_date,
         -- 标记每个 店×品 的最新一期 → 产品/门店维“当前库存”用它过滤,避免跨周求和
-        (f.transaction_date = max(f.transaction_date) OVER w_all) AS is_latest
+        (f.transaction_date = max(f.transaction_date) OVER w_all) AS is_latest,
+        max(f.transaction_date) OVER w_all                         AS latest_transaction_date
     FROM mart.fact_sell_through f
     WINDOW
         w     AS (PARTITION BY f.supplier_code, f.store_id, f.gtin_norm
                   ORDER BY f.transaction_date),
         w_all AS (PARTITION BY f.supplier_code, f.store_id, f.gtin_norm)
+), with_dos_demand AS (
+    SELECT
+        b.*,
+        -- 每个 门店×SKU 各自以其最新快照为锚点，累计最近 28 天销量。
+        -- 使用 28 个自然日而非 4 个数据行，缺周不会把较早销量误算进 DOS 分母。
+        sum(CASE WHEN b.transaction_date >= b.latest_transaction_date - 27
+                 THEN b.sale_qty ELSE 0 END)
+            OVER (PARTITION BY b.supplier_code, b.store_id, b.gtin_norm)
+                                                              AS sale_qty_last_4w
+    FROM base b
 )
 SELECT
     b.supplier_code,
@@ -84,14 +99,20 @@ SELECT
     -- 距上次观测的周数(透明列):首期=NULL;正常连续周=1;缺周>1。
     -- P 是相邻两快照之差 —— weeks_since_prev>1 的行把多周采购累加在一周(伪峰,如缺 KW15
     -- 导致的 KW16)。看板可 weeks_since_prev=1 只看干净连续周 P,或据此标记/排除缺周。
-    ((b.transaction_date - b.prev_txn_date) / 7)::int  AS weeks_since_prev
-FROM base b
+    ((b.transaction_date - b.prev_txn_date) / 7)::int  AS weeks_since_prev,
+    -- 新列追加在末尾，保持 CREATE OR REPLACE VIEW 对旧列顺序的兼容性。
+    concat_ws(' · ', nullif(p.customer_sku_code, ''),
+                    coalesce(p.product_name, b.gtin_norm))  AS sku,
+    b.latest_transaction_date,
+    b.sale_qty_last_4w
+FROM with_dos_demand b
 LEFT JOIN mart.dim_store   s ON s.supplier_code = b.supplier_code AND s.store_id = b.store_id
 LEFT JOIN mart.dim_product p ON p.gtin_norm    = b.gtin_norm;
 
 COMMENT ON VIEW mart.v_psi IS
   'PSI 口径(供 Superset):S/I 取自 mart.fact_sell_through,P 由库存恒等式 I本期−I上期+S本期 推出;'
-  '存量列 inventory_qty 跨周不可加,产品/门店维当前库存请用 is_latest=true 过滤';
+  '存量列 inventory_qty 跨周不可加,产品/门店维当前库存请用 is_latest=true 过滤;'
+  'DOS = SUM(当前库存)*28/SUM(每店每SKU最近4周销量),看板以 is_latest=true 计算';
 
 -- 只读授权:与 mart 其它对象一致
 GRANT SELECT ON mart.v_psi TO bi_readonly;
