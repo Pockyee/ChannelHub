@@ -207,17 +207,17 @@ def chart_defs(ds_id, ds_geo):
             "groupby": ["sku"], "metrics": [DOS, I, S_4W], "adhoc_filters": [LATEST_FILTER],
             "row_limit": 1000,
             "column_config": {"DOS (days, 4-week demand)": {"d3NumberFormat": ",.1f"}},
-            "order_by_cols": ['["DOS (days, 4-week demand)", true']}
+            "order_by_cols": ['["sku", true]']}
     e_qc = query_context(ds_id, e_fd, columns=["sku"], metrics=[DOS, I, S_4W],
-                         orderby=[["DOS (days, 4-week demand)", True]])
+                         orderby=[["sku", True]])
 
-    # F 「销售 按系列→SKU」表格(显式两层:系列在上,SKU 在下)。
+    # F 「销售 按系列→SKU」表格：SKU 列以编码开头，统一按编码升序。
     f_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
-            "groupby": ["product_series", "product_name"], "metrics": [S],
+            "groupby": ["product_series", "sku"], "metrics": [S],
             "adhoc_filters": [], "row_limit": 1000,
-            "order_by_cols": ['["product_series", true]', '["product_name", true]']}
-    f_qc = query_context(ds_id, f_fd, columns=["product_series", "product_name"],
-                         metrics=[S], orderby=[[S, False]])
+            "order_by_cols": ['["sku", true]']}
+    f_qc = query_context(ds_id, f_fd, columns=["product_series", "sku"],
+                         metrics=[S], orderby=[["sku", True]])
 
     # G 「SO by Bundesland」表格(按德国联邦州统计 SO=售出量;另 dataset = v_psi_bundesland)
     g_fd = {**geo, "viz_type": "table", "query_mode": "aggregate",
