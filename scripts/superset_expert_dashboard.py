@@ -110,6 +110,7 @@ DOS = {
     "sqlExpression": "SUM(inventory_qty) * 28.0 / NULLIF(SUM(sale_qty_last_4w), 0)",
     "label": "DOS (days, 4-week demand)",
     "optionName": "metric_dos_days_4w",
+    "d3format": ",.1f",
 }
 # SO = Sell-Out(售出量),与 S 同列不同标签;按 Bundesland 统计用。store 数 = 去重计数。
 SO = m("sale_qty", "SO (Sell-Out)", opt="metric_so")
@@ -205,7 +206,8 @@ def chart_defs(ds_id, ds_geo):
     e_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
             "groupby": ["sku"], "metrics": [DOS, I, S_4W], "adhoc_filters": [LATEST_FILTER],
             "row_limit": 1000,
-            "order_by_cols": ['["DOS (days, 4-week demand)", true]']}
+            "column_config": {"DOS (days, 4-week demand)": {"d3NumberFormat": ",.1f"}},
+            "order_by_cols": ['["DOS (days, 4-week demand)", true']}
     e_qc = query_context(ds_id, e_fd, columns=["sku"], metrics=[DOS, I, S_4W],
                          orderby=[[DOS, True]])
 
