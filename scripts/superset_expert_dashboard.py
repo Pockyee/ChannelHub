@@ -252,9 +252,12 @@ def position_json(chart_ids, chart_names):
                       "meta": {"text": DASH_TITLE}},
     }
     n = len(chart_ids)
+    # DOS/Sale 两张 SKU 明细表需要全宽，避免列被压缩。
+    full_width_indices = {4, 5}
     row_ids = []
     for idx, (cid, name) in enumerate(zip(chart_ids, chart_names)):
-        row_no = idx // 2
+        # 前四张图保持每行两张；SKU 明细表各占一整行。
+        row_no = idx // 2 if idx < 4 else idx - 2
         row_id = f"ROW-{row_no}"
         if row_id not in pos:
             pos[row_id] = {"type": "ROW", "id": row_id, "children": [],
@@ -262,7 +265,7 @@ def position_json(chart_ids, chart_names):
                            "meta": {"background": "BACKGROUND_TRANSPARENT"}}
             row_ids.append(row_id)
         # 该行是否只有这一张(总数为奇数且是最后一张)→ 铺满
-        alone = (idx == n - 1 and idx % 2 == 0)
+        alone = idx in full_width_indices or (idx == n - 1 and idx % 2 == 0)
         comp_id = f"CHART-{idx}"
         pos[row_id]["children"].append(comp_id)
         pos[comp_id] = {
