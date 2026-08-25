@@ -15,6 +15,7 @@ Python 邮件 ETL、Prefect flow 与 Metabase 报表。
 | Metabase | `metabase/metabase:latest` | `127.0.0.1:3000`(仅本机) | 备用 BI;走 SSH 隧道访问 |
 | Prefect 3 OSS | `prefecthq/prefect:3-latest` | `127.0.0.1:4200`(仅本机) | 任务编排 server;走 SSH 隧道访问(OSS 无认证不可公网暴露) |
 | Caddy | `caddy:2` | `0.0.0.0:443` | HTTPS 反代到 Superset;证书 SAN 写 `PREFECT_PROXY_HOST` |
+| wg-easy | `ghcr.io/wg-easy/wg-easy:15` | 隧道 `0.0.0.0:51820/udp`;管理 UI `127.0.0.1:51821`(仅本机) | WireGuard VPN — 远程设备走服务器固定 IP 出网;见 [docs/VPN.md](docs/VPN.md) |
 
 > 镜像统一用滚动 tag 以保证可拉取；如需可复现环境，请在 `docker-compose.yml`
 > 中固定为具体版本 tag。
@@ -24,7 +25,7 @@ Python 邮件 ETL、Prefect flow 与 Metabase 报表。
 - 已安装 **Docker Engine + Docker Compose 插件**（`docker compose version` 可用）。
   > 本机当前未安装 Docker，需先安装：参见
   > https://docs.docker.com/engine/install/ ，并将当前用户加入 `docker` 组。
-- 端口 `5432 / 5050 / 9000 / 9001 / 3000 / 4200 / 443` 未被占用（如冲突见下文「故障排查」）。
+- 端口 `5432 / 5050 / 9000 / 9001 / 3000 / 4200 / 443 / 51820(udp) / 51821` 未被占用（如冲突见下文「故障排查」）。
   > 443 给 Caddy（Prefect HTTPS 反代）；若被占用改 `.env` 的 `PREFECT_HTTPS_PORT`。
 
 ## 快速开始

@@ -252,6 +252,57 @@ services:
       - channelhub
 
   # ---------------------------------------------------------------------------
+  # WireGuard VPN(wg-easy):远程设备用**官方 WireGuard 客户端**接入本服务器。
+  # 默认 full tunnel(AllowedIPs=0.0.0.0/0)——客户端所有上网流量从本机出口出去,
+  # 对外呈现的就是这台 VM 的固定 IP(ens6 上的 /32 公网地址)。
+  #
+  # 首启由 INIT_* 自动初始化;之后一切以 volume 里的 wg-easy.db 为准
+  # (改 .env 的 WG_* 不会覆盖已初始化的库,要改配置请进管理 UI)。
+  #
+  # 部署后还要做一步(容器管不了):在 IONOS Cloud Panel 的防火墙策略放行
+  # UDP ${WG_PORT}。详见 docs/VPN.md。
+  # ---------------------------------------------------------------------------
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy:15
+    container_name: channelhub-wg-easy
+    restart: unless-stopped
+    environment:
+      # 首启自动初始化;库已存在时下列值全部被忽略
+      INIT_ENABLED: "true"
+      INIT_USERNAME: ${WG_ADMIN_USERNAME:-admin}
+      INIT_PASSWORD: ${WG_ADMIN_PASSWORD}
+      # 写进客户端配置的 Endpoint。本机公网 IP 固定,直接填 IP 即可
+      INIT_HOST: ${WG_HOST}
+      INIT_PORT: ${WG_PORT:-51820}
+      INIT_DNS: ${WG_DNS:-1.1.1.1}
+      INIT_IPV4_CIDR: ${WG_IPV4_CIDR:-10.8.0.0/24}
+      # full tunnel;若只想走内网,改成 172.18.0.0/16, 10.8.0.0/24
+      INIT_ALLOWED_IPS: ${WG_ALLOWED_IPS:-0.0.0.0/0}
+      # 隧道内只跑 IPv4:channelhub 这张 bridge 没开 IPv6,开了会启动报错
+      DISABLE_IPV6: "true"
+      # 管理 UI 走明文 HTTP —— 前提是它只绑 127.0.0.1(见下面 ports)。
+      # 若把 WG_UI_BIND 改成 0.0.0.0,请先解决 TLS,别裸奔。
+      INSECURE: ${WG_INSECURE:-true}
+    volumes:
+      - wg_easy_data:/etc/wireguard
+      # 容器内 modprobe wireguard 需要(配合 SYS_MODULE)
+      - /lib/modules:/lib/modules:ro
+    ports:
+      # UDP 隧道口:必须 0.0.0.0,否则外部客户端连不进来
+      - "${WG_PORT:-51820}:51820/udp"
+      # 管理 UI:默认仅本机,远程管理走 SSH 隧道(同 Prefect / Metabase 的套路)
+      - "${WG_UI_BIND:-127.0.0.1}:${WG_UI_PORT:-51821}:51821/tcp"
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      # 只作用于容器自己的 netns,不动宿主机内核参数
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      - channelhub
+
+  # ---------------------------------------------------------------------------
   # 一次性任务：创建 process work pool 并把 prefect.yaml 里的 deployment 注册到服务端
   # ---------------------------------------------------------------------------
   prefect-deploy:
@@ -336,6 +387,7 @@ volumes:
   caddy_data:
   caddy_config:
   superset_data:
+  wg_easy_data:
 
 networks:
   channelhub:
