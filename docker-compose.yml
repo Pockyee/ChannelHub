@@ -262,8 +262,9 @@ services:
     environment:
       PREFECT_API_URL: http://prefect:4200/api
       PREFECT_CLI_PROMPT: "false"
-      EMAIL_BACKUP_CRON: ${EMAIL_BACKUP_CRON}
-      EMAIL_PARSE_CRON: ${EMAIL_PARSE_CRON}
+      # 带默认值：服务器 .env 若还是旧版(缺这两项)也能注册出正确排期
+      EMAIL_BACKUP_CRON: ${EMAIL_BACKUP_CRON:-*/5 * * * *}
+      EMAIL_PARSE_CRON: ${EMAIL_PARSE_CRON:-0 3 * * *}
     volumes:
       - ./flows:/app/flows:ro
       - ./prefect.yaml:/app/prefect.yaml:ro
@@ -316,6 +317,8 @@ services:
       SMTP_USER: ${SMTP_USER}
       SMTP_PASSWORD: ${SMTP_PASSWORD}
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO}
+      # 邮件服务：true=照常生成附件与记账但**不实际发信**（首次上线务必先 true）
+      MAIL_SERVICE_DRY_RUN: ${MAIL_SERVICE_DRY_RUN:-true}
     volumes:
       - ./flows:/app/flows:ro
     depends_on:

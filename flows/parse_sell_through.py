@@ -24,6 +24,7 @@ import email as email_lib
 from datetime import date, datetime
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.utils import parseaddr
 
 import psycopg
 from minio import Minio
@@ -50,6 +51,19 @@ def _decode(v) -> str:
         return str(make_header(decode_header(v))) if v else ""
     except Exception:
         return str(v)
+
+
+def _is_self_sent(msg) -> bool:
+    """本系统自己发出去的信（含 mail-service 的回信）→ 不该被当报表解析。
+
+    mail-service 回信里带的 ai-sunrise-*.csv 表头不匹配 HUTT_REQUIRED，一旦这封
+    信被抄送/转发落回 INBOX，就会触发一封"未识别 csv 表头"的误告警。
+    """
+    if msg.get("X-ChannelHub-Rule"):          # 我们发信时打的标记
+        return True
+    sender = parseaddr(_decode(msg.get("From")))[1].strip().lower()
+    own = {a for a in (_env("EMAIL_USER").lower(), _env("SMTP_USER").lower()) if a}
+    return bool(sender and sender in own)
 
 
 def _minio() -> Minio:
@@ -396,6 +410,9 @@ def process_eml(object_key: str) -> dict:
 
     raw = _minio().get_object(bucket, object_key).read()
     msg = email_lib.message_from_bytes(raw)
+    if _is_self_sent(msg):
+        logger.info("跳过自发信 %s（不解析自己发出去的邮件）", object_key)
+        return stats
     msg_id = (msg.get("Message-ID") or "").strip()
     subject = _decode(msg.get("Subject"))
     sender = _decode(msg.get("From"))

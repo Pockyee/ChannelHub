@@ -27,7 +27,20 @@ deployments:
     description: "MinIO .eml → xlsx → 表头识别 → raw.sell_through_<供应商>；未识别发告警；末尾刷新 mart 物化层"
     work_pool:
       name: channelhub-pool
-    # 无独立 cron：由 email-backup flow 成功结束后 run_deployment 触发
-    # （见 flows/email_backup.py）。schedules 显式置空，redeploy 清掉服务端旧排期。
-    # （.env 的 EMAIL_PARSE_CRON 不再被引用，可保留也可删。）
+    # 主触发路径：email-backup **收到新邮件时**才 run_deployment 触发（见
+    # flows/email_backup.py）。下面这条 cron 只是每日兜底补跑：email-backup 以前
+    # 每小时无条件触发一次，天然会把失败的解析补上；现在改成按需触发后需要它补位。
+    # 本 flow 实测 136 秒（全量重扫归档），别把它调回高频。
+    schedules:
+      - cron: "{{ $EMAIL_PARSE_CRON }}"
+        timezone: "UTC"
+        active: true
+
+  - name: mail-service
+    entrypoint: flows/mail_service.py:mail_service
+    description: "MinIO .eml → 规则匹配（发件人域名 + 附件签名）→ 生成附件并回信；先占坑再发信，不重复回信"
+    work_pool:
+      name: channelhub-pool
+    # 无独立 cron：同样由 email-backup 收到新邮件后触发。
+    # 回信是对外动作，不该在没有新邮件时空跑。
     schedules: []

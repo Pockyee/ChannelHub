@@ -157,14 +157,27 @@ docker compose down -v               # 连同数据卷一起删除（谨慎，�
    EMAIL_USER=你的完整邮箱地址          # 例 name@yourdomain.com
    EMAIL_PASSWORD=该邮箱密码            # 不是 IONOS 账户登录密码
    ```
-   其余 `EMAIL_*` 已给好默认（`imap.ionos.com:993` SSL、仅 INBOX、每小时整点）。
-   SMTP 也已写入 `.env` 留作以后发信，本 flow 不用。
+   其余 `EMAIL_*` 已给好默认（`imap.ionos.de:993` SSL、仅 INBOX、每 5 分钟）。
+   SMTP 也已写入 `.env`，供解析告警与邮件服务回信用。
 2. 起服务（首次会 build worker 镜像）：
    ```bash
    docker compose up -d --build
    ```
 3. 在 Prefect UI（http://localhost:4200）→ Deployments 可见 **email-backup**，
-   已带每小时 cron；点 **Run** 可立即手动触发一次，运行历史在 UI 可查。
+   已带 `*/5` cron；点 **Run** 可立即手动触发一次，运行历史在 UI 可查。
+
+### 为什么备份能跑每 5 分钟
+
+本 flow 自己很轻（实测**约 3 秒**：一次 IMAP SEARCH + 每封一次 MinIO `stat_object`）。
+真正重的是下游 `parse-sell-through`（实测**平均 136 秒、最长 220 秒**，因为它每次
+全量重扫归档里所有 `.eml`）。所以 email-backup **只在真的收到新邮件时**才
+`run_deployment` 触发下游（`if total["uploaded"]`）—— 没有这道闸，cron 一提速就会让
+解析 flow 几乎连续占用 worker，并发的 `mart.refresh_all()` 还会 TRUNCATE 掉 Superset
+正在读的 mart 表。
+
+代价是丢了「每小时无条件重跑」的隐式自愈，所以 `parse-sell-through` 配了一条
+**每日兜底 cron**（`.env` 的 `EMAIL_PARSE_CRON`，默认 `0 3 * * *`）补位。
+**别把 `EMAIL_PARSE_CRON` 调回高频。**
 
 ### 改频率 / 文件夹
 
@@ -205,7 +218,8 @@ ELT 分层（medallion）：
 ```bash
 # 按序应用全部迁移（幂等，可重复执行；003 取代 002 视图链，005 又取代 003 视图链；
 # 006 在 core 之上新建 mart 物化层，不取代视图链；007 在 mart 上加 PSI 口径视图 v_psi；
-# 008 加 PLZ→Bundesland 参照 + 按州视图 v_psi_bundesland）
+# 008 加 PLZ→Bundesland 参照 + 按州视图 v_psi_bundesland；
+# 009 加 Hutt 网店订单表 + BI 口径视图；010 加邮件服务记账表 raw.mail_request）
 for f in db/migrations/0*.sql; do
   docker compose exec -T postgres psql -U channelhub -d channelhub \
     -v ON_ERROR_STOP=1 -f - < "$f"
@@ -293,10 +307,112 @@ done
   同一未识别文件只告警一次
 - 新增 xlsx 供应商 = `XLSX_REGISTRY` 加一条表头签名 + 一个 `raw.sell_through_<x>` 表
 
-编排：Prefect deployment **parse-sell-through**，**无独立 cron** —— 由
-**email-backup flow 成功后链式触发**（`run_deployment`，timeout=0 非阻塞），
-保证「备份完立刻解析、解析完立刻刷新 mart」一条链。改 `.env` 的备份 cron 后重新
-注册同邮箱备份方式（`docker compose up -d --build --force-recreate prefect-deploy prefect-worker`）。
+另有一道**自发信护栏**：`From` 是本系统自己的邮箱、或带 `X-ChannelHub-Rule` 头的
+邮件直接跳过不解析 —— 邮件服务 flow 的回信附件（`ai-sunrise-*.csv`）表头不匹配
+`HUTT_REQUIRED`，万一那封回信被抄送/转发落回 INBOX，没这道闸就会收到一封
+「未识别 csv 表头」的误告警。
+
+编排：Prefect deployment **parse-sell-through**，由 **email-backup 收到新邮件后
+链式触发**（`run_deployment`，timeout=0 非阻塞），保证「备份完立刻解析、解析完
+立刻刷新 mart」一条链；另配 `EMAIL_PARSE_CRON`（默认每日 03:00 UTC）兜底补跑。
+改 `.env` 的 cron 后重新注册（`docker compose up -d --build --force-recreate prefect-deploy prefect-worker`）。
+
+## 邮件服务 flow（收信 → 处理 → 回信）
+
+[flows/mail_service.py](flows/mail_service.py)：和解析 ETL 读同一批 MinIO `.eml`，
+但干的是**请求-应答**的活 —— 读懂来信、生成文件、**回信给发件人**。
+
+之所以单独一个 flow 而不是塞进 `parse_sell_through`：那条是「把附件吞进 `raw.*`」的
+单向 ETL，这条要对外发信，失败语义完全不同（发信必须 at-most-once，宁可漏发也不能
+重复轰炸对方），混在一起会让回信失败把整条 ETL 标红。
+
+### 当前规则：ai-sunrise 订单导出
+
+发件人以 `@ai-sunrise.de` 结尾、附件是 Shopify `orders_export.csv` → 生成物流用的
+`ai-sunrise-DDMMYYYY.csv` 作附件回信。列映射：
+
+| 输出列 | 源列 | 说明 |
+|---|---|---|
+| `Referenznummer` | `Name` | `#1547` → `ais_1547` |
+| `Bestelldatum` | `Created at` | → `24.08.26`（DD.MM.YY） |
+| `Stück` / `Produktname` / `SKU` | `Lineitem quantity` / `name` / `sku` | 原样 |
+| `Name` | `Shipping Name` | 订单级 |
+| `Straße` | `Shipping Address1` + `Address2` | 用 `", "` 拼，只在两边都非空时加分隔符 |
+| `PLZ` | `Shipping Zip` | 去掉 Excel 防丢零的撇号；**不补零**（AT 是 4 位） |
+| `Ort` / `Land` | `Shipping City` / `Country` | 订单级 |
+| `Zusatz` | `Shipping Company` | 订单级 |
+
+**订单级字段要前向填充**：Shopify 导出里一个订单的地址/日期只出现在该订单的
+**第一行**，后续行项目那些列全是空的；而输出要求每个行项目都带完整地址。所以走两遍
+（先按订单号收集每个字段的第一个非空值，再按原始行序输出）。
+输出是**分号分隔 + UTF-8 BOM + CRLF**，德语 Excel 双击即正确打开（BOM 不能省）。
+不做业务过滤，取消单/未付款单照样输出（1:1 转换）。
+
+### 两道护栏（**必须先于规则匹配**）
+
+1. **不回自己的信** —— `From` == `EMAIL_USER`/`SMTP_USER` 直接跳过。
+   这条不是可选项：规则匹配的是「发件人以 ai-sunrise.de 结尾」，而
+   `data@ai-sunrise.de` 自己也满足，没这道闸就是自触发死循环。
+2. **不回自动信** —— `Auto-Submitted` / `Precedence: bulk` / `List-Id` /
+   我们发信时打的 `X-ChannelHub-Rule` 头，命中任一即跳过（防和对方的自动回复对打）。
+
+回信自带 `Auto-Submitted: auto-replied` + `X-ChannelHub-Rule` + `In-Reply-To`
+（挂在原话题下），所以即便回信被转发回 INBOX 也会被两个 flow 一起跳过。
+
+### 幂等：绝不重复发信
+
+记账表 `raw.mail_request`（见 [010 迁移](db/migrations/010_raw_mail_request.sql)），
+**先占坑再发信**：`INSERT ... ON CONFLICT DO NOTHING`，`rowcount=0` 就说明这封处理过，
+直接跳过、连 `.eml` 都不下载。中途失败的行会**留在 `processing` 且不自动重试**
+（重试可能变成重复发信），同时给 `ALERT_EMAIL_TO` 发告警。
+
+排查/重发：
+
+```bash
+docker compose exec -T postgres psql -U channelhub -d channelhub -c \
+  "SELECT rule_key, status, email_from, reply_file_name, rows_out, claimed_at
+     FROM raw.mail_request ORDER BY request_id DESC LIMIT 20;"
+
+# 确认无误后想让某封重发：删掉那行，下次 mail-service 运行会重新处理
+docker compose exec -T postgres psql -U channelhub -d channelhub -c \
+  "DELETE FROM raw.mail_request WHERE source_object_key='email/…/42.eml';"
+```
+
+### DRY RUN 开关
+
+`.env` 的 `MAIL_SERVICE_DRY_RUN`（**默认 `true`**）：为 true 时照常生成附件、照常
+记账，但**不实际发信**，只把收件人/附件名/大小打进日志。首次上线务必先 true 跑通，
+确认无误再改 `false`。
+
+### 加新的邮件处理功能
+
+往 `flows/mail_service.py` 的 `RULES` 加一条 + 写一个 handler，flow 骨架不用动：
+
+```python
+RULES = [
+    {
+        "key": "你的规则名",              # 也是 raw.mail_request 的去重键之一
+        "from_domain": "example.de",      # 发件人地址后缀
+        "match_attachment": 你的识别函数,   # (fn, payload) -> bool
+        "handler": 你的处理函数,            # -> (附件名, 附件字节, 回信正文, 行数)
+        "reject_body": "识别不了时的回信正文",
+    },
+]
+```
+
+### 离线自检
+
+改了转换逻辑或护栏后先跑这两个（不碰邮箱、不碰生产数据）：
+
+```bash
+docker run --rm -v "$PWD":/w -w /w channelhub-prefect-worker \
+  python scripts/check_ai_sunrise_transform.py   # 转换结果逐格比对 fixture
+docker run --rm -v "$PWD":/w -w /w channelhub-prefect-worker \
+  python scripts/check_mail_guards.py            # 两道护栏 + 回信自环
+```
+
+样例数据在 [tests/fixtures/](tests/fixtures/)（`orders_export.csv` 输入、
+`ai-sunrise-expected.csv` 期望输出）。
 
 ## 可视化（Superset 主对外 + Metabase 备用 + 只读角色）
 
@@ -383,7 +499,7 @@ Hutt 自有 Shopify 网店的订单报表,数据源是邮件 ETL 落进 `raw.sel
   → `mart.v_hutt_shop_orders`:类型化(金额 numeric、时间 timestamptz)+ 清洗
   (邮编去前导撇号、DE 补足 5 位)。核心口径 **`net_total` = `total` − `refunded_amount`**
   (净收入,退款即扣);`region` = DE 按 PLZ 映射联邦州(复用 008 的
-  `core.plz_bundesland` 参照),其他国家给国家码。已加入 `BI_VIEW_MIGRATIONS`,
+  `core.plz_bundesland` 参照),其他国家给国家码。已加入 `IDEMPOTENT_MIGRATIONS`,
   deploy 自动重放;本地手动应用:
   ```bash
   docker compose exec -T postgres psql -U channelhub -d channelhub \
@@ -425,7 +541,7 @@ Hutt 自有 Shopify 网店的订单报表,数据源是邮件 ETL 落进 `raw.sel
   deploy 和 [scripts/initialize.sh](scripts/initialize.sh) 共用(单一事实源)。
 - **加新看板**:在 `scripts/` 下按 `superset_<名字>_dashboard.py` 命名,通配自动纳入,push 即上线。
 - **加新 BI 口径视图**:写成 `CREATE OR REPLACE VIEW` 的迁移,加进 `superset_provision.sh`
-  顶部的 `BI_VIEW_MIGRATIONS` 数组即可(别放会 DROP 重塑 core 视图链的 002/003/005)。
+  顶部的 `IDEMPOTENT_MIGRATIONS` 数组即可(别放会 DROP 重塑 core 视图链的 002/003/005)。
 - **加新 BI 参照 seed**(如 PLZ→州):写个幂等 loader,加进 `BI_SEED_LOADERS` 数组,deploy 自动重放。
 - **改动是持久的**:看板存 Superset 元数据库、视图存 channelhub 库,都在持久卷里,容器重建不丢。
 - **失败即判部署失败**(`script_stop:true`)——刻意给即时反馈;想"看板脚本出错不挡部署",
@@ -455,4 +571,6 @@ Hutt 自有 Shopify 网店的订单报表,数据源是邮件 ETL 落进 `raw.sel
 7. ~~mart 物化为真实表（GTIN 粒度 + 运营公司维）+ 解析 flow 末尾链式刷新~~ ✅
    已完成（见「MART 物化层」）
 8. ~~Superset PSI 看板（P 由库存恒等式从相邻期推出）~~ ✅ 已完成（见「PSI 看板」）
-9. 后续：接入更多供应商（加 raw 表 + 表头签名，自动并入 core/mart）；LLM 控图层
+9. ~~邮件服务：收信 → 处理 → 回信（规则注册表 + 不回自己的信）~~ ✅ 已完成
+   （见「邮件服务 flow」）
+10. 后续：接入更多供应商（加 raw 表 + 表头签名，自动并入 core/mart）；LLM 控图层

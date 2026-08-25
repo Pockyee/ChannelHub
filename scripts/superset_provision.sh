@@ -7,7 +7,7 @@
 #
 # 做四件事,全部幂等(可重复跑,存在则更新):
 #   1) 等 Superset 就绪(/health)
-#   2) 应用 BI 口径视图(CREATE OR REPLACE,见下方 BI_VIEW_MIGRATIONS)
+#   2) 应用幂等迁移(BI 口径视图 + 记账表,见下方 IDEMPOTENT_MIGRATIONS)
 #   3) 确保 Superset admin 存在(superset-init 的 create-admin 有时没建成)
 #      + 确保 ChannelHub 数据源(scripts/superset_setup.py)
 #   4) 重跑所有看板构建脚本 scripts/superset_*_dashboard.py(create-or-update)
@@ -24,13 +24,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# 只挑"幂等可重放"的 BI 视图迁移(CREATE OR REPLACE VIEW)。**别**把会 DROP CASCADE
-# 重塑 core 视图链的 002/003/005 放进来——那些由 initialize.sh 一次性前向应用。
-# 以后新增同类 BI 视图(如 008_mart_xxx.sql 也是 CREATE OR REPLACE),加到这里即可。
-BI_VIEW_MIGRATIONS=(
+# 只挑"幂等可重放"的迁移(CREATE OR REPLACE VIEW / CREATE TABLE IF NOT EXISTS)。
+# **别**把会 DROP CASCADE 重塑 core 视图链的 002/003/005 放进来——那些由
+# initialize.sh 一次性前向应用。以后新增同类幂等迁移,加到这里即可。
+IDEMPOTENT_MIGRATIONS=(
   db/migrations/007_mart_psi.sql
   db/migrations/008_geo_plz_bundesland.sql
   db/migrations/009_mart_hutt_shop.sql
+  db/migrations/010_raw_mail_request.sql
 )
 
 # 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。
@@ -66,11 +67,11 @@ for i in $(seq 1 40); do            # 最多 ~120s
 done
 [[ -n "$ready" ]] || { echo "✗ Superset 120s 内未就绪" >&2; docker compose logs --tail=60 superset >&2 || true; exit 1; }
 
-# --- 2) 应用 BI 口径视图(幂等)+ 装载 BI 参照 seed -----------------------------
-echo "==> [2/4] 应用 BI 口径视图 + 参照 seed"
+# --- 2) 应用幂等迁移 + 装载 BI 参照 seed -----------------------------
+echo "==> [2/4] 应用幂等迁移 + 参照 seed"
 export POSTGRES_USER="$PG_USER" POSTGRES_DB="$PG_DB"   # 供 loader 内 docker compose exec 用
-for f in "${BI_VIEW_MIGRATIONS[@]}"; do
-  echo "  · 视图 $(basename "$f")"
+for f in "${IDEMPOTENT_MIGRATIONS[@]}"; do
+  echo "  · 迁移 $(basename "$f")"
   docker compose exec -T postgres psql -U "$PG_USER" -d "$PG_DB" \
     -v ON_ERROR_STOP=1 -f - < "$f" >/dev/null
 done

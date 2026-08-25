@@ -180,19 +180,32 @@ def email_backup() -> dict:
         # 让 Prefect UI 标红，但已成功的邮件已落 MinIO，下次幂等续传
         raise RuntimeError(f"{total['failed']} 封邮件备份失败，详见任务日志：{total}")
 
-    # 备份成功后立即触发 parse-sell-through（parse 已无独立 cron，只跟这里跑）。
-    # timeout=0：仅创建 flow run 即返回，不阻塞等 parse 跑完，worker 立刻接走。
-    # 触发失败则让本次 run 标红——备份数据已幂等落 MinIO，下次备份会再次触发。
-    try:
-        pr = run_deployment(
-            name="parse-sell-through/parse-sell-through", timeout=0
-        )
-        logger.info("已触发 parse-sell-through，flow_run_id=%s", pr.id)
-    except Exception as exc:
+    # 只在**真的收到新邮件**时才触发下游。
+    # 本 flow 自己很轻（约 3 秒），但 parse-sell-through 要全量重扫归档里所有
+    # .eml（实测 136 秒起步，随归档增长），每轮无条件触发的话 cron 一提速就会
+    # 让它几乎连续占用 worker，并发的 mart.refresh_all() 还会 TRUNCATE 掉
+    # Superset 正在读的 mart 表。加这道闸后 cron 才敢调到 */5。
+    # 代价：丢了"每小时无条件重跑"的隐式自愈 → parse-sell-through 已在
+    # prefect.yaml 配了每日兜底 cron（EMAIL_PARSE_CRON）补回来。
+    if not total["uploaded"]:
+        logger.info("本轮无新邮件，跳过下游触发")
+        return total
+
+    # timeout=0：仅创建 flow run 即返回，不阻塞等下游跑完，worker 立刻接走。
+    # 触发失败则让本次 run 标红——备份数据已幂等落 MinIO，下次收到新邮件会再触发。
+    failures = []
+    for dep in ("parse-sell-through/parse-sell-through", "mail-service/mail-service"):
+        try:
+            pr = run_deployment(name=dep, timeout=0)
+            logger.info("已触发 %s，flow_run_id=%s", dep, pr.id)
+        except Exception as exc:
+            failures.append(f"{dep}: {exc}")
+            logger.error("触发 %s 失败：%s", dep, exc)
+    if failures:
         raise RuntimeError(
-            f"备份成功但触发 parse-sell-through 失败：{exc} —— "
-            f"备份数据已在 MinIO，下次备份会重试触发"
-        ) from exc
+            "备份成功但触发下游失败：" + "；".join(failures)
+            + " —— 备份数据已在 MinIO，下次收到新邮件会重试触发"
+        )
     return total
 
 

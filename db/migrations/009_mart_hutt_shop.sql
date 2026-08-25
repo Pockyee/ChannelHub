@@ -17,7 +17,7 @@
 --   · shipping_zip 源数据带前导撇号(Excel 防丢零),清洗后 DE 邮编补足 5 位。
 --
 -- 幂等:CREATE OR REPLACE VIEW,可重复执行;已加入 superset_provision.sh 的
---       BI_VIEW_MIGRATIONS,每次 deploy 自动重放。
+--       IDEMPOTENT_MIGRATIONS,每次 deploy 自动重放。
 -- ============================================================================
 
 -- 源表:Shopify 订单导出 CSV 原貌镜像(79 列全 TEXT + 血缘列)。
