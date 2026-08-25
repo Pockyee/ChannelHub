@@ -219,6 +219,36 @@ _ORDER_LEVEL = (_C_CREATED, _C_SHIP_NAME, _C_ADDR1, _C_ADDR2,
                 _C_ZIP, _C_CITY, _C_COUNTRY, _C_COMPANY)
 
 
+def _unwrap(row: list[str], ncols: int) -> list[str]:
+    """整行被多包了一层引号时再解一层。
+
+    实际收到的 Shopify 导出长这样：表头正常 79 列，但**每行数据被整行包进一对
+    引号**、内部引号双写（`""`）。csv.reader 会把这样一行读成**一个字段**，
+    行项目列全取不到 → 静默产出 0 行空文件。这里检测到"只有 1 个字段但表头有
+    多列"就把那个字段的内容再当一行 CSV 解一遍。
+
+    只在解出来确实变多列时才采纳，所以对正常格式的文件是无害的。
+    """
+    if len(row) == 1 and ncols > 1 and row[0].strip():
+        inner = next(csv.reader(io.StringIO(row[0])), None)
+        if inner and len(inner) > 1:
+            return inner
+    return row
+
+
+def _read_csv(payload: bytes) -> tuple[list[str], list[list[str]]]:
+    """→ (表头, 数据行)。两种格式都吃：标准 CSV，和整行多包一层引号的变体。"""
+    reader = csv.reader(io.StringIO(payload.decode("utf-8-sig", errors="replace")))
+    rows = list(reader)
+    if not rows:
+        return [], []
+    header = rows[0]
+    if len(header) == 1:                      # 表头本身也被包了
+        header = _unwrap(header, 79)
+    ncols = len(header)
+    return header, [_unwrap(r, ncols) for r in rows[1:]]
+
+
 def _header_index(header: list[str]) -> dict[str, int]:
     idx: dict[str, int] = {}
     for i, h in enumerate(header):
@@ -233,8 +263,7 @@ def is_orders_export(fn: str, payload: bytes) -> bool:
     if not fn.lower().endswith(".csv"):
         return False
     try:
-        text = payload.decode("utf-8-sig", errors="replace")
-        header = next(csv.reader(io.StringIO(text)), None)
+        header, _ = _read_csv(payload)
     except Exception:
         return False
     if not header:
@@ -277,9 +306,7 @@ def build_ai_sunrise_rows(payload: bytes) -> list[list[str]]:
 
     不做任何业务过滤 —— 取消单、未付款单都照样输出（1:1 转换）。
     """
-    text = payload.decode("utf-8-sig", errors="replace")
-    reader = csv.reader(io.StringIO(text))
-    header = next(reader, None)
+    header, data_rows = _read_csv(payload)
     if not header:
         raise ValueError("空 CSV：没有表头行")
     idx = _header_index(header)
@@ -290,7 +317,7 @@ def build_ai_sunrise_rows(payload: bytes) -> list[list[str]]:
 
     items: list[tuple[str, str, str, str]] = []
     ctx: dict[str, dict[str, str]] = {}
-    for row in reader:
+    for row in data_rows:
         if not any(c.strip() for c in row):
             continue                                   # 尾部空行
         order = cell(row, _C_ORDER)
@@ -365,6 +392,12 @@ RULES = [
         "reject_body": (
             "Hallo,\n\nleider konnte der Anhang nicht als Shopify-Bestellexport "
             "(orders_export.csv) erkannt werden. Es wurde keine Datei erzeugt.\n\n"
+            "Diese Nachricht wurde automatisch von ChannelHub erzeugt.\n"
+        ),
+        "empty_body": (
+            "Hallo,\n\nder Anhang wurde als Shopify-Bestellexport erkannt, es "
+            "konnte daraus aber keine einzige Bestellposition gelesen werden. "
+            "Es wurde keine Datei erzeugt.\n\n"
             "Diese Nachricht wurde automatisch von ChannelHub erzeugt.\n"
         ),
     },
@@ -492,6 +525,20 @@ def handle_eml(object_key: str) -> dict:
 
         fn, payload = hit
         out_name, out_bytes, body, n_rows = rule["handler"](fn, payload)
+        if n_rows == 0:
+            # 表头认出来了却一行都没读到 —— 多半是没见过的格式变体。
+            # 绝不能把只有表头的空文件当成正常结果发出去（收件人会照着空文件发货）。
+            _send_reply(msg, sender, rule["key"], rule["empty_body"], None, logger)
+            finish(rule["key"], object_key, "empty", f"来源附件 {fn}，解析出 0 行")
+            stats["unrecognized"] += 1
+            logger.error("%s 解析出 0 行，已回信说明且**不发空文件**：%s", fn, object_key)
+            _send_alert(
+                f"[ChannelHub] 邮件服务解析出 0 行: {fn}",
+                f"对象: {object_key}\n发件人: {sender}\n附件: {fn}\n\n"
+                f"表头命中订单导出签名，但一行数据都没读出来 —— 多半是没见过的\n"
+                f"格式变体。已回信告知发件人，未发送空文件。请检查该附件格式。",
+            )
+            return stats
         _send_reply(msg, sender, rule["key"], body, (out_name, out_bytes), logger)
         # dry run 也照常占坑记账（这正是首次上线"消化历史积压"的手段：跑一遍
         # dry run，历史邮件就都记上账了，之后切成真发信不会突然给几个月前的

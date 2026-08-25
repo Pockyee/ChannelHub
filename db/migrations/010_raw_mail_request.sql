@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS raw.mail_request (
     email_message_id  text,
     email_from        text,
     email_subject     text,
-    status            text NOT NULL,        -- processing / replied / dry_run / unrecognized
+    status            text NOT NULL,        -- processing / replied / dry_run / unrecognized / empty
     detail            text,                 -- 来源附件名，或失败原因
     reply_file_name   text,                 -- 回信附件名，如 ai-sunrise-25082026.csv
     rows_out          integer,              -- 生成附件的数据行数
