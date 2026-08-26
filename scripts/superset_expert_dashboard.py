@@ -280,12 +280,24 @@ def position_json(chart_ids, chart_names):
 
 
 def native_filter_configuration(ds_id, chart_ids):
-    """Company → SKU 级联筛选，作用于本 PSI 数据集的全部 PSI 图。
+    """四个原生过滤器：Company → SKU（级联）、PLZ、Display（陈列档位）。
 
     company 先选后，SKU 下拉只显示该公司实际拥有的产品名称；不选 SKU 时，所有
-    图即展示该 company 的全部 SKU 汇总。州图来自另一个数据集，故刻意不纳入范围。
+    图即展示该 company 的全部 SKU 汇总。
+
+    PLZ 是门店邮编（mart.v_psi.plz，来自 dim_store）。Superset 4.1 的原生过滤器
+    没有自由文本输入类型，Value 过滤器开 searchAllOptions（"Dynamically search all
+    filter values"）就是"手输邮编 → 下拉命中 → 选中"最接近的形态。注意少数 PLZ
+    下有 2 家门店（201 店 / 198 个不同 PLZ），选中会同时命中它们。
+
+    Display 是陈列档位 Big / Small / Without Display（mart.v_psi.display_tier，
+    名单见 db/seed/{big,small}_display_plz.csv）。
+
+    范围：全部图，含"Sale by Bundesland"。州图数据集 mart.v_psi_bundesland 是
+    SELECT bundesland, v.* 派生的，company / product_name / plz / display_tier
+    四列同名继承，Superset 对 in-scope 的跨数据集图按列名下推 extraFormData。
     """
-    psi_chart_ids = chart_ids[:-1]
+    psi_chart_ids = chart_ids
     return [
         {
             "id": "NATIVE_FILTER-company",
@@ -312,6 +324,36 @@ def native_filter_configuration(ds_id, chart_ids):
             "type": "NATIVE_FILTER",
             "chartsInScope": psi_chart_ids,
             "tabsInScope": [],
+            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
+                              "searchAllOptions": False, "inverseSelection": False},
+        },
+        {
+            "id": "NATIVE_FILTER-plz",
+            "name": "PLZ",
+            "filterType": "filter_select",
+            "targets": [{"datasetId": ds_id, "column": {"name": "plz"}}],
+            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
+            "cascadeParentIds": [],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "chartsInScope": psi_chart_ids,
+            "tabsInScope": [],
+            # searchAllOptions：下拉不预取全量，输入什么就去库里搜什么 —— 手输邮编定位单店。
+            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
+                              "searchAllOptions": True, "inverseSelection": False},
+        },
+        {
+            "id": "NATIVE_FILTER-display_tier",
+            "name": "Display",
+            "filterType": "filter_select",
+            "targets": [{"datasetId": ds_id, "column": {"name": "display_tier"}}],
+            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
+            "cascadeParentIds": [],
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "chartsInScope": psi_chart_ids,
+            "tabsInScope": [],
+            # 只有三个取值，全量预取即可，不需要 searchAllOptions。
             "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
                               "searchAllOptions": False, "inverseSelection": False},
         },

@@ -28,6 +28,9 @@ cd "$REPO_ROOT"
 # **别**把会 DROP CASCADE 重塑 core 视图链的 002/003/005 放进来——那些由
 # initialize.sh 一次性前向应用。以后新增同类幂等迁移,加到这里即可。
 IDEMPOTENT_MIGRATIONS=(
+  # 011 序号最大却排第一:007 的 display_tier 列 LEFT JOIN 它建的 core.store_display_plz,
+  # 依赖方向与序号相反,数组是显式有序的 —— 别按文件名重排。
+  db/migrations/011_core_display_plz.sql
   db/migrations/007_mart_psi.sql
   db/migrations/008_geo_plz_bundesland.sql
   db/migrations/009_mart_hutt_shop.sql
@@ -38,6 +41,7 @@ IDEMPOTENT_MIGRATIONS=(
 # 这些是 BI 视图的数据依赖(如 v_psi_bundesland 需要 PLZ→州参照),每次 deploy 重放。
 BI_SEED_LOADERS=(
   db/seed/load_plz_bundesland.sh
+  db/seed/load_display_plz.sh
 )
 
 if [[ ! -f .env ]]; then

@@ -3,6 +3,10 @@
 -- ----------------------------------------------------------------------------
 -- 分层:raw(落地) → core(规范化+去重+白名单) → mart(物化事实) → 本视图(BI 口径)
 --
+-- !! 依赖 !! 本视图末尾的 display_tier 列 LEFT JOIN core.store_display_plz(011 建),
+--            故 **011_core_display_plz.sql 必须先于本文件执行**(序号大但排前面)。
+--            scripts/superset_provision.sh 与 scripts/initialize.sh 都已按此排序。
+--
 -- 背景:渠道报表只给我们两件事 —— 门店“售出量 S”和“在手库存 I”,**没有采购量 P**。
 --       P(门店从渠道进了多少货)要由库存流水恒等式从相邻两期推出:
 --
@@ -104,10 +108,16 @@ SELECT
     concat_ws(' · ', nullif(p.customer_sku_code, ''),
                     coalesce(p.product_name, b.gtin_norm))  AS sku,
     b.latest_transaction_date,
-    b.sale_qty_last_4w
+    b.sale_qty_last_4w,
+    -- 新列追加在末尾(同上):门店邮编 + 陈列档位,供看板的 PLZ / Display 两个过滤器使用。
+    -- 档位名单是人工维护的 PLZ 白名单(core.store_display_plz,见 011);名单里没有的门店
+    -- —— 以及 dim_store 里 postal_code 为空的门店 —— 一律落为 Without Display,不丢行。
+    s.postal_code                                   AS plz,
+    coalesce(d.display_tier, 'Without Display')     AS display_tier
 FROM with_dos_demand b
 LEFT JOIN mart.dim_store   s ON s.supplier_code = b.supplier_code AND s.store_id = b.store_id
-LEFT JOIN mart.dim_product p ON p.gtin_norm    = b.gtin_norm;
+LEFT JOIN mart.dim_product p ON p.gtin_norm    = b.gtin_norm
+LEFT JOIN core.store_display_plz d ON d.plz = s.postal_code;
 
 COMMENT ON VIEW mart.v_psi IS
   'PSI 口径(供 Superset):S/I 取自 mart.fact_sell_through,P 由库存恒等式 I本期−I上期+S本期 推出;'

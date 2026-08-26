@@ -56,6 +56,19 @@ else
   shopt -s nullglob
   migrations=(db/migrations/*.sql)
   shopt -u nullglob
+  # 依赖修正:007 的 display_tier 列 LEFT JOIN core.store_display_plz(011 建),但按文件名排
+  # 011 在 007 之后 → 全新库上 007 会因表不存在而失败。这里把 011 提到 007 之前。
+  # (011 只建 core 表/函数 + GRANT,故仍要排在 004 建 bi_readonly 角色之后 —— 007 天然满足。)
+  DISPLAY_MIG=db/migrations/011_core_display_plz.sql
+  if [[ -f "$DISPLAY_MIG" ]]; then
+    ordered=()
+    for f in "${migrations[@]}"; do
+      [[ "$f" == "$DISPLAY_MIG" ]] && continue
+      [[ "$(basename "$f")" == 007_* ]] && ordered+=("$DISPLAY_MIG")
+      ordered+=("$f")
+    done
+    migrations=("${ordered[@]}")
+  fi
   if (( ${#migrations[@]} == 0 )); then
     echo "  · 无迁移文件,跳过"
   else

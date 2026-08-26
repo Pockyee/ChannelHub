@@ -463,8 +463,10 @@ P 由库存恒等式从相邻两期推出:
 - **看板搭建** [scripts/superset_expert_dashboard.py](scripts/superset_expert_dashboard.py)(幂等,
   存在则更新):注册 `mart.v_psi` 数据集 → 建 7 张图(Sale/Inventory 周趋势 / 各产品销售 /
   当前库存按产品 / DOS KPI / SKU DOS 表 / SKU 销售明细 / Sale by Bundesland)→
-  组装看板 `PSI 看板`(slug=`psi`)；顶部提供 **Company → SKU** 级联筛选：
-  选 company、不选 SKU 即看该 company 全部 SKU，继续选 SKU 即看单品。先跑过
+  组装看板 `PSI 看板`(slug=`psi`)；顶部提供 4 个筛选器 **Company → SKU / PLZ / Display**:
+  Company→SKU 级联(选 company、不选 SKU 即看该 company 全部 SKU,继续选 SKU 即看单品);
+  **PLZ** 手输门店邮编定位单店(见下节说明);**Display** 按陈列档位过滤(见「重点门店陈列档位」)。
+  4 个筛选器作用于**全部 7 张图**(含 Sale by Bundesland)。先跑过
   `superset_setup.py`(需数据源 `ChannelHub`),再:
   ```bash
   docker run --rm --network channelhub_channelhub --env-file .env \
@@ -490,6 +492,36 @@ P 由库存恒等式从相邻两期推出:
   **SO(Sell-Out=售出量)按州** = `GROUP BY bundesland, SUM(sale_qty)`。
 - 看板里对应「**Sale by Bundesland**」表(各州 Sale + 门店数),由看板脚本自动建。
 - 新增门店若 PLZ 不在参照 → `bundesland=(unknown)`(不丢行);补 CSV 后重跑 loader 即可。
+
+### 重点门店陈列档位(Big / Small / Without Display)
+
+业务方按陈列规模盯一批重点门店,分三档。渠道报表里没有这个属性,靠**人工维护的 PLZ 名单**打标:
+
+- **名单 CSV(即权威,各一列 `plz`,带表头)**
+  [db/seed/big_display_plz.csv](db/seed/big_display_plz.csv) /
+  [db/seed/small_display_plz.csv](db/seed/small_display_plz.csv)。
+  档位由**文件名**决定,CSV 里不存档位,避免手填拼错。
+  同一 PLZ 同时出现在两张表 → **Big Display 优先**;两张都没有的门店 → `Without Display`
+  (视图侧 `coalesce` 兜底,不需要第三张表,也不会丢行)。
+- **装载** [db/seed/load_display_plz.sh](db/seed/load_display_plz.sh) → `core.store_display_plz`
+  (建表见 [db/migrations/011_core_display_plz.sql](db/migrations/011_core_display_plz.sql)):
+  一次读两张 CSV,`TRUNCATE stage` → `\copy` → `core.sync_display_plz()`(CSV 没有的删、其余 upsert)。
+  ```bash
+  # 1) 编辑 db/seed/small_display_plz.csv,一行一个 PLZ(Excel 存的 CRLF 也没问题)
+  # 2) 重跑 loader —— 即时生效,**不用改代码、不用重建看板**
+  bash db/seed/load_display_plz.sh
+  ```
+  单张 CSV 为空是正常状态(名单尚未收集);**两张都为空会中止**(退出码 2),免得误清空参照表。
+- **口径** `mart.v_psi` 末尾两列 `plz` / `display_tier`(`mart.v_psi_bundesland` 经 `v.*` 继承),
+  对应看板顶部的 **PLZ** 和 **Display** 两个筛选器。
+  PLZ 筛选器开了 `searchAllOptions` —— Superset 4.1 原生筛选器没有自由文本输入类型,这是
+  「手输邮编 → 下拉命中 → 选中」最接近的形态。注意少数 PLZ 下有 2 家门店(实测 43 个 Big
+  Display 邮编对应 46 家店),选中会同时命中它们。
+
+> **执行顺序坑**:`007` 的 `display_tier` 列 JOIN 了 `011` 建的表,**011 必须先于 007 跑**。
+> `scripts/superset_provision.sh` 的 `IDEMPOTENT_MIGRATIONS` 数组和 `scripts/initialize.sh`
+> 的迁移排序都已按此处理 —— 别按文件名重排。
+
 
 ### Hutt Online Shop 看板(自有网店电商)
 
