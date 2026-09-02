@@ -4,7 +4,7 @@
 -- 分层架构：
 --   raw  (本层)  忠实落地，全 TEXT，不做任何转换，可完整追溯到源邮件
 --   core (后续)  规范化 dim/fact，把各 raw.sell_through_* UNION 归一
---   mart (后续)  BI 聚合，供 Metabase
+--   mart (后续)  BI 聚合，供 Superset
 --
 -- 设计：**每供应商一张独立 raw 表**（约定 raw.sell_through_<供应商>）。
 -- 各大渠道 Excel 列结构不同，每表精确镜像该供应商文件，最忠实可追溯；

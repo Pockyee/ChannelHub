@@ -1,5 +1,5 @@
 -- ============================================================================
--- 004 — BI 只读角色（Metabase / 未来 LLM 连库用）
+-- 004 — BI 只读角色（Superset / 未来 LLM 连库用）
 -- ----------------------------------------------------------------------------
 -- 仅 SELECT raw + core；不含写权限、不含 public 写。密码不在本文件（追踪文件不放
 -- 密钥）——应用后单独用 .env 的 BI_READONLY_PASSWORD 执行 ALTER ROLE 设置。
@@ -21,7 +21,7 @@ BEGIN
 END
 $$;
 
-COMMENT ON ROLE bi_readonly IS 'BI 只读：Metabase/LLM 连库，仅 SELECT raw+core';
+COMMENT ON ROLE bi_readonly IS 'BI 只读：Superset/LLM 连库，仅 SELECT raw+core';
 
 -- 连接 / schema 使用
 GRANT CONNECT ON DATABASE channelhub TO bi_readonly;

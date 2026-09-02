@@ -6,7 +6,7 @@ name: channelhub
 
 services:
   # ---------------------------------------------------------------------------
-  # 主数据库：承载 channelhub(主业务库) + metabase + prefect 三个库
+  # 主数据库：承载 channelhub(主业务库) + prefect + superset 支撑库
   # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16
@@ -21,7 +21,7 @@ services:
       - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
-      # 首启（空卷）时自动执行：仅创建 metabase / prefect 空支撑库
+      # 首启（空卷）时自动执行：仅创建 prefect 空支撑库
       - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
@@ -101,29 +101,6 @@ services:
       - channelhub
 
   # ---------------------------------------------------------------------------
-  # BI 报表；应用元数据库指向 postgres 的 metabase 库
-  # ---------------------------------------------------------------------------
-  metabase:
-    image: metabase/metabase:latest
-    container_name: channelhub-metabase
-    restart: unless-stopped
-    environment:
-      MB_DB_TYPE: postgres
-      MB_DB_DBNAME: metabase
-      MB_DB_PORT: "5432"
-      MB_DB_HOST: postgres
-      MB_DB_USER: ${POSTGRES_USER}
-      MB_DB_PASS: ${POSTGRES_PASSWORD}
-    ports:
-      # 仅本机回环；外部访问经 Caddy HTTPS(443)反代,或 SSH 隧道
-      - "127.0.0.1:${METABASE_PORT:-3000}:3000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - channelhub
-
-  # ---------------------------------------------------------------------------
   # Prefect 3 OSS server；后端库指向 postgres 的 prefect 库
   # ---------------------------------------------------------------------------
   prefect:
@@ -166,6 +143,8 @@ services:
     container_name: channelhub-superset-init
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      # 环境标识:非 production 时 Superset 标题会带 [TEST]，避免把测试看板当生产看
+      CHANNELHUB_ENV: ${CHANNELHUB_ENV:-production}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       SUPERSET_ADMIN_USERNAME: ${SUPERSET_ADMIN_USERNAME}
@@ -204,6 +183,8 @@ services:
     restart: unless-stopped
     environment:
       SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+      # 环境标识:非 production 时 Superset 标题会带 [TEST]，避免把测试看板当生产看
+      CHANNELHUB_ENV: ${CHANNELHUB_ENV:-production}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
@@ -229,7 +210,7 @@ services:
 
   # ---------------------------------------------------------------------------
   # HTTPS 反向代理:Caddy 给 Superset UI 自动申请公网证书;Prefect 与
-  # Metabase 不对外,走 SSH 隧道访问。对外域名由 .env 的 PREFECT_PROXY_HOST
+  # 对外域名由 .env 的 PREFECT_PROXY_HOST
   # 注入(变量名是历史遗留,语义=Caddy 对外暴露的 host)。
   # ---------------------------------------------------------------------------
   caddy:
@@ -290,7 +271,7 @@ services:
     ports:
       # UDP 隧道口:必须 0.0.0.0,否则外部客户端连不进来
       - "${WG_PORT:-51820}:51820/udp"
-      # 管理 UI:默认仅本机,远程管理走 SSH 隧道(同 Prefect / Metabase 的套路)
+      # 管理 UI:默认仅本机,远程管理走 SSH 隧道(同 Prefect 的套路)
       - "${WG_UI_BIND:-127.0.0.1}:${WG_UI_PORT:-51821}:51821/tcp"
     cap_add:
       - NET_ADMIN
@@ -316,6 +297,12 @@ services:
       # 带默认值：服务器 .env 若还是旧版(缺这两项)也能注册出正确排期
       EMAIL_BACKUP_CRON: ${EMAIL_BACKUP_CRON:-*/5 * * * *}
       EMAIL_PARSE_CRON: ${EMAIL_PARSE_CRON:-0 3 * * *}
+      # 竞品情报三条排期（同样带默认值，旧版 .env 也能注册出正确排期）
+      CI_PRICE_CRON: ${CI_PRICE_CRON:-0 5 * * *}
+      CI_SOCIAL_CRON: ${CI_SOCIAL_CRON:-30 5 * * *}
+      CI_MEDIA_CRON: ${CI_MEDIA_CRON:-0 6 * * 1}
+      # 简报排在 ci-media(周一 06:00)之后，确保当周媒体评测已入库
+      CI_DIGEST_CRON: ${CI_DIGEST_CRON:-0 7 * * 1}
     volumes:
       - ./flows:/app/flows:ro
       - ./prefect.yaml:/app/prefect.yaml:ro
@@ -370,6 +357,35 @@ services:
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO}
       # 邮件服务：true=照常生成附件与记账但**不实际发信**（首次上线务必先 true）
       MAIL_SERVICE_DRY_RUN: ${MAIL_SERVICE_DRY_RUN:-true}
+      # ⚠️ 环境标识:默认 production —— 生产的 .env 不动也不受影响。
+      #    设成任何非 production 的值(如 test)会**强制关闭对外发信**，
+      #    且 MAIL_SERVICE_DRY_RUN=false 也翻不开(见 flows/mail_service.py:_dry_run)。
+      CHANNELHUB_ENV: ${CHANNELHUB_ENV:-production}
+      # ---- 竞品情报采集（ci_*.py）----
+      # 干跑默认 true：宁可空跑一轮，也不要首次就往事实表里写没校准过的解析结果
+      CI_DRY_RUN: ${CI_DRY_RUN:-true}
+      CI_MINIO_BUCKET: ${CI_MINIO_BUCKET:-ci-archive}
+      CI_MIN_INTERVAL_SEC: ${CI_MIN_INTERVAL_SEC:-2.5}
+      CI_CONTACT_EMAIL: ${CI_CONTACT_EMAIL}
+      CI_AUTHOR_SALT: ${CI_AUTHOR_SALT}
+      CI_AMAZON_ENABLED: ${CI_AMAZON_ENABLED:-true}
+      CI_MEDIA_EXTRA_FEEDS: ${CI_MEDIA_EXTRA_FEEDS}
+      CI_MYDEALZ_GROUPS: ${CI_MYDEALZ_GROUPS}
+      EBAY_CLIENT_ID: ${EBAY_CLIENT_ID}
+      EBAY_CLIENT_SECRET: ${EBAY_CLIENT_SECRET}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY}
+      REDDIT_CLIENT_ID: ${REDDIT_CLIENT_ID}
+      REDDIT_CLIENT_SECRET: ${REDDIT_CLIENT_SECRET}
+      # Instagram Hashtag Search（观察清单在 core.ci_hashtag，不在这里）
+      INSTAGRAM_ACCESS_TOKEN: ${INSTAGRAM_ACCESS_TOKEN}
+      INSTAGRAM_IG_USER_ID: ${INSTAGRAM_IG_USER_ID}
+      INSTAGRAM_GRAPH_VERSION: ${INSTAGRAM_GRAPH_VERSION:-v26.0}
+      # 配额预算，默认 26 而非 30：Meta 那边的账本才是权威，留 4 个安全余量
+      CI_INSTAGRAM_HASHTAG_BUDGET: ${CI_INSTAGRAM_HASHTAG_BUDGET:-26}
+      # ---- LLM 简报（ci_digest.py）----
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      CI_DIGEST_WINDOW_DAYS: ${CI_DIGEST_WINDOW_DAYS:-7}
+      CI_DIGEST_MAX_INPUT_TOKENS: ${CI_DIGEST_MAX_INPUT_TOKENS:-400000}
     volumes:
       - ./flows:/app/flows:ro
     depends_on:

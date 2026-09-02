@@ -11,7 +11,7 @@
     │                                              ┌────────────────────┐
     ▼                                              │ docker compose 栈   │
 GitHub  ─── PR ──► CI(语法 + compose 校验)        │  postgres / minio   │
-        │                                          │  prefect / metabase │
+        │                                          │  prefect / superset │
         └── main push ──► CD ── SSH ──► git pull ─▶│  caddy / worker     │
                                   + compose up -d  └────────────────────┘
 ```

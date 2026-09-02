@@ -98,7 +98,7 @@ docker compose ps wg-easy           # 等到 healthy
 ## 二、添加一台客户端设备
 
 管理 UI 只绑 `127.0.0.1`（明文 HTTP，不能公网暴露），所以从你本机开 SSH 隧道访问 ——
-跟 Prefect / Metabase 是同一套路：
+跟 Prefect 是同一套路：
 
 ```bash
 ssh -N -L 51821:localhost:51821 -i ~/.ssh/channelhub_deploy deploy@82.165.180.145
