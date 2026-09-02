@@ -3,9 +3,12 @@
 -- ----------------------------------------------------------------------------
 -- 分层:raw(落地) → core(规范化+去重+白名单) → mart(物化事实) → 本视图(BI 口径)
 --
--- !! 依赖 !! 本视图末尾的 display_tier 列 LEFT JOIN core.store_display_plz(011 建),
---            故 **011_core_display_plz.sql 必须先于本文件执行**(序号大但排前面)。
+-- !! 依赖 !! 本视图末尾两列连的参照表都在**序号更大**的迁移里建:
+--              · display_tier ← core.store_display_plz(011)
+--              · bundesland   ← core.plz_bundesland  (008)
+--            故 **008 与 011 必须先于本文件执行**(序号大但排前面)。
 --            scripts/superset_provision.sh 与 scripts/initialize.sh 都已按此排序。
+--            反过来,mart.v_psi_bundesland 现在只是本视图的别名 → 拆到 018,排在本文件之后。
 --
 -- 背景:渠道报表只给我们两件事 —— 门店“售出量 S”和“在手库存 I”,**没有采购量 P**。
 --       P(门店从渠道进了多少货)要由库存流水恒等式从相邻两期推出:
@@ -113,11 +116,16 @@ SELECT
     -- 档位名单是人工维护的 PLZ 白名单(core.store_display_plz,见 011);名单里没有的门店
     -- —— 以及 dim_store 里 postal_code 为空的门店 —— 一律落为 Without Display,不丢行。
     s.postal_code                                   AS plz,
-    coalesce(d.display_tier, 'Without Display')     AS display_tier
+    coalesce(d.display_tier, 'Without Display')     AS display_tier,
+    -- 新列追加在末尾(同上):门店 PLZ → 联邦州(core.plz_bundesland,008 建,CSV 即权威)。
+    -- 门店缺 PLZ、或 PLZ 不在参照里 → (unknown),LEFT JOIN 不丢行 —— 看板的 Bundesland
+    -- 过滤器与「Sale by Bundesland」表都读这一列(不再另建 v_psi_bundesland 数据集)。
+    coalesce(pb.bundesland, '(unknown)')            AS bundesland
 FROM with_dos_demand b
 LEFT JOIN mart.dim_store   s ON s.supplier_code = b.supplier_code AND s.store_id = b.store_id
 LEFT JOIN mart.dim_product p ON p.gtin_norm    = b.gtin_norm
-LEFT JOIN core.store_display_plz d ON d.plz = s.postal_code;
+LEFT JOIN core.store_display_plz d ON d.plz = s.postal_code
+LEFT JOIN core.plz_bundesland    pb ON pb.plz = s.postal_code;
 
 COMMENT ON VIEW mart.v_psi IS
   'PSI 口径(供 Superset):S/I 取自 mart.fact_sell_through,P 由库存恒等式 I本期−I上期+S本期 推出;'

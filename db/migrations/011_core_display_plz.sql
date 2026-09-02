@@ -11,7 +11,7 @@
 --   · core.sync_display_plz()        stage → 参照表(删/改增),CSV 即权威
 --
 -- 消费方:mart.v_psi(007)末尾的 plz / display_tier 两列 —— 即 Superset 看板的
---        PLZ 过滤器与 Display 过滤器。v_psi_bundesland(008)经 v.* 自动继承。
+--        PLZ 过滤器与 Display 过滤器。兼容别名 v_psi_bundesland(018)经 v.* 自动继承。
 --
 -- !! 执行顺序 !!
 --   本文件序号虽然是 011,但 007_mart_psi.sql 依赖它建的 core.store_display_plz,

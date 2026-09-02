@@ -28,20 +28,31 @@ cd "$REPO_ROOT"
 # **别**把会 DROP CASCADE 重塑 core 视图链的 002/003/005 放进来——那些由
 # initialize.sh 一次性前向应用。以后新增同类幂等迁移,加到这里即可。
 IDEMPOTENT_MIGRATIONS=(
-  # 011 序号最大却排第一:007 的 display_tier 列 LEFT JOIN 它建的 core.store_display_plz,
+  # 011/008 排在 007 前面:007 末尾两列 LEFT JOIN 它们建的参照表
+  # (display_tier←core.store_display_plz、bundesland←core.plz_bundesland),
   # 依赖方向与序号相反,数组是显式有序的 —— 别按文件名重排。
   db/migrations/011_core_display_plz.sql
-  db/migrations/007_mart_psi.sql
   db/migrations/008_geo_plz_bundesland.sql
+  db/migrations/007_mart_psi.sql
+  # 018 反过来依赖 007(v_psi_bundesland 现在只是 v_psi 的别名),必须排在它之后。
+  db/migrations/018_mart_psi_bundesland_alias.sql
   db/migrations/009_mart_hutt_shop.sql
   db/migrations/010_raw_mail_request.sql
+  # 竞品情报线(012→013→014 有依赖顺序,别按文件名重排)
+  db/migrations/012_ci_core.sql
+  db/migrations/013_ci_raw.sql
+  db/migrations/014_ci_mart.sql
+  db/migrations/015_ci_instagram.sql
+  db/migrations/016_ci_digest.sql
+  db/migrations/017_ci_mention_detail.sql
 )
 
 # 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。
-# 这些是 BI 视图的数据依赖(如 v_psi_bundesland 需要 PLZ→州参照),每次 deploy 重放。
+# 这些是 BI 视图的数据依赖(如 v_psi 的 bundesland 列需要 PLZ→州参照),每次 deploy 重放。
 BI_SEED_LOADERS=(
   db/seed/load_plz_bundesland.sh
   db/seed/load_display_plz.sh
+  db/seed/load_ci_product.sh
 )
 
 if [[ ! -f .env ]]; then

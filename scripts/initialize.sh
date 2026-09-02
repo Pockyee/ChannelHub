@@ -6,12 +6,11 @@
 #   2) 设 bi_readonly 角色密码(取自 .env)
 #   3) 装载 db/seed/gtin_whitelist.csv                          → core.gtin_whitelist
 #   4) 在 Postgres 建空的 superset 元数据库(若不存在)
-#   5) Metabase 自动化(管理员/接 channelhub 数据源/建仪表盘) — 走 SSH 隧道访问
 #   6) Superset 注册 ChannelHub 数据源                          — 主对外 BI
 #   7) 应用 007 PSI 口径视图 mart.v_psi + 建 Expert PSI 看板    — 主对外 BI
 #
 # 前置:
-#   - docker compose up -d 已跑过,postgres/metabase/superset/superset-init 都健康
+#   - docker compose up -d 已跑过,postgres/superset/superset-init 都健康
 #   - 项目根目录有 .env(权限 600),所有 *_PASSWORD / *_ADMIN_* / POSTGRES_* 已填
 #
 # 用法(在项目根目录执行,或 sudo -u deploy bash -lc):
@@ -56,19 +55,23 @@ else
   shopt -s nullglob
   migrations=(db/migrations/*.sql)
   shopt -u nullglob
-  # 依赖修正:007 的 display_tier 列 LEFT JOIN core.store_display_plz(011 建),但按文件名排
-  # 011 在 007 之后 → 全新库上 007 会因表不存在而失败。这里把 011 提到 007 之前。
-  # (011 只建 core 表/函数 + GRANT,故仍要排在 004 建 bi_readonly 角色之后 —— 007 天然满足。)
-  DISPLAY_MIG=db/migrations/011_core_display_plz.sql
-  if [[ -f "$DISPLAY_MIG" ]]; then
-    ordered=()
-    for f in "${migrations[@]}"; do
-      [[ "$f" == "$DISPLAY_MIG" ]] && continue
-      [[ "$(basename "$f")" == 007_* ]] && ordered+=("$DISPLAY_MIG")
-      ordered+=("$f")
-    done
-    migrations=("${ordered[@]}")
-  fi
+  # 依赖修正:007 末尾两列 LEFT JOIN 的参照表建在序号更大的迁移里 ——
+  #   display_tier ← core.store_display_plz(011)、bundesland ← core.plz_bundesland(008),
+  # 按文件名排它们都在 007 之后 → 全新库上 007 会因表不存在而失败。这里把两者提到 007 之前。
+  # (两者只建 core 表/函数 + GRANT,故仍要排在 004 建 bi_readonly 角色之后 —— 007 天然满足;
+  #  008 里依赖 v_psi 的那个视图已拆到 018,按文件名就排在 007 之后,无需特殊处理。)
+  PRE_007=(db/migrations/008_geo_plz_bundesland.sql db/migrations/011_core_display_plz.sql)
+  ordered=()
+  for f in "${migrations[@]}"; do
+    skip=
+    for pre in "${PRE_007[@]}"; do [[ "$f" == "$pre" ]] && skip=1; done
+    [[ -n "$skip" ]] && continue
+    if [[ "$(basename "$f")" == 007_* ]]; then
+      for pre in "${PRE_007[@]}"; do [[ -f "$pre" ]] && ordered+=("$pre"); done
+    fi
+    ordered+=("$f")
+  done
+  migrations=("${ordered[@]}")
   if (( ${#migrations[@]} == 0 )); then
     echo "  · 无迁移文件,跳过"
   else
@@ -107,11 +110,6 @@ else
   echo "  · 已建 superset 空库"
 fi
 
-echo "==> 5/6 Metabase 自动化(管理员/数据源/仪表盘) — 经 SSH 隧道用"
-docker run --rm --network "$NET" \
-  --env-file .env \
-  -v "$REPO_ROOT/scripts/metabase_setup.py:/mb.py:ro" \
-  prefecthq/prefect:3-latest python /mb.py
 
 echo "==> 6/7 Superset 注册 ChannelHub 数据源 — 主对外 BI(443)"
 docker run --rm --network "$NET" \
@@ -128,5 +126,4 @@ echo
 echo "✓ 初始化完成。"
 echo "  · Superset(主 BI):浏览器开 https://<服务器IP> 用 SUPERSET_ADMIN_USERNAME/PASSWORD 登录"
 echo "  · Expert PSI 看板:https://<服务器IP>/superset/dashboard/psi/"
-echo "  · Metabase(备用): SSH 隧道 ssh -L 3000:localhost:3000 deploy@<服务器IP> → http://localhost:3000"
 echo "  · 任一步失败,修复后重跑本脚本即可(全部幂等)。"

@@ -5,15 +5,19 @@
   · scripts/superset_setup.py 已跑过(存在数据源 "ChannelHub")
 
 做四件事(全部幂等:存在则更新,不存在则创建):
-  1) 把 mart.v_psi 注册成 Superset 数据集(主时间列 = transaction_date)
-  2) 建 6 张图(产品维以"系列 Z1/Z7/X10"为上层,SKU 颜色变体为下层):
-       A 「SI Weekly Trend」       折线时序 —— SUM 销售/库存 按周
+  1) 把 mart.v_psi 注册成 Superset 数据集(主时间列 = transaction_date);
+     全部图共用这一个数据集 —— 原生过滤器是按列名下推的,同一数据集才不会漏图/报错
+  2) 建 8 张图(产品维以"系列 Z1/Z7/X10"为上层,SKU 颜色变体为下层):
+       A 「Weekly Sale & Inventory」折线时序 —— SUM 销售/库存 按周
        B 「Sale by Series」        柱状     —— 维度=系列,SUM 销售
        C 「Current Inv by Series」 饼图     —— is_latest 过滤,SUM 库存
        D 「DOS (4-week demand)」  大数字   —— 当前库存可供应天数
        E 「DOS by SKU」            表格     —— DOS / 当前库存 / 最近四周销售
        F 「Sale by Series / SKU」  表格     —— 系列→SKU 两层,SUM 销售
-  3) 组装成看板「Expert PSI Dashboard」(slug=psi),并提供 Company → SKU 联动筛选
+       G 「Sale by Bundesland」    表格     —— 按联邦州 SUM 销售 / 门店数
+       H 「Sale by Shop」          表格     —— 门店销量排行:总销量 + 每 SKU 一列
+  3) 组装成看板「Expert PSI Dashboard」(slug=psi),并提供筛选:
+       Time range(起止日期)→ Company → SKU → Bundesland → City → PLZ → Display
   4) 把图挂到看板;并清理被改名/移除的旧图(声明式)
 
 口径说明见 db/migrations/007_mart_psi.sql:
@@ -30,7 +34,7 @@
     -v "$PWD/scripts/superset_expert_dashboard.py:/dash.py:ro" \\
     prefecthq/prefect:3-latest python /dash.py
 """
-import json, os, sys, http.cookiejar, urllib.request, urllib.error
+import json, os, re, sys, http.cookiejar, urllib.request, urllib.error
 
 # 共享 cookie jar:CSRF 是会话型,csrf_token 的 GET 会种 session cookie,
 # 后续写操作必须带回同一 cookie(否则 Superset 报 "CSRF session token is missing")。
@@ -42,8 +46,7 @@ ADMIN_USER = os.environ["SUPERSET_ADMIN_USERNAME"]
 ADMIN_PW = os.environ["SUPERSET_ADMIN_PASSWORD"]
 DB_NAME = "ChannelHub"
 SCHEMA = "mart"
-TABLE = "v_psi"
-TABLE_GEO = "v_psi_bundesland"        # v_psi + bundesland(按州 SO 用)
+TABLE = "v_psi"                       # 含 bundesland / city / plz / display_tier 全部维度
 DASH_SLUG = "psi"
 DASH_TITLE = "Expert PSI Dashboard"
 
@@ -114,7 +117,56 @@ DOS = {
 }
 # Sale(售出量)：按 Bundesland 统计时也使用与其余图一致的 Sale 标签。
 SALE_BY_STATE = m("sale_qty", "Sale (S)", opt="metric_sale_by_state")
+SALE_BY_SHOP = m("sale_qty", "Sale (S)", opt="metric_sale_by_shop")
+
+
+def sku_metrics(skus):
+    """每个 SKU 一列的销量指标(条件求和),列名压到「型号 颜色」这么短。
+
+    源串形如 "15260000419 · Imo Watch Phone Z1 green" —— 客户编码和"Imo Watch Phone"
+    这种品牌前缀在表头里纯属占地方(编码在「Sale by Series / SKU」里查得到),
+    所以从型号 token(Z1/Z7/X10,与 v_psi.product_series 同一套正则)截到末尾 →
+    "Z1 green"。取不到型号的(将来的配件类)保留原品名,不硬猜。
+
+    万一两个 SKU 压出同一个短名,给后来的那个补上客户编码 —— 表格列名撞车会
+    让 Superset 只显示其中一列。SQL 字面量里的单引号照规矩翻倍转义。
+    """
+    out, used = [], set()
+    for idx, sku in enumerate(skus):
+        code, _, name = sku.partition(" · ")
+        mm = re.search(r"([XZ]\d{1,2})\s*(.*)$", name or sku, re.I)
+        label = f"{mm.group(1).upper()} {mm.group(2)}".strip() if mm else (name or sku)
+        if label in used:
+            label = f"{label} ({code})"
+        used.add(label)
+        out.append({
+            "expressionType": "SQL",
+            "sqlExpression":
+                "SUM(CASE WHEN sku = '{}' THEN sale_qty ELSE 0 END)".format(sku.replace("'", "''")),
+            "label": label,
+            "optionName": f"metric_sale_sku_{idx}",
+        })
+    return out
 STORES = m("store_id", "Stores", agg="COUNT_DISTINCT", opt="metric_stores")
+
+# 时间过滤器的默认值。Superset 4.1 的时间控件按值猜"帧"(guessFrame):"No filter"
+# 猜成 No filter 帧,点开要先在 RANGE TYPE 里选 Custom 才见到日期框;而 "具体时间 : now"
+# 会被 customTimeRangeDecode 认成 Custom 帧 —— 点开直接是「起始日期 / 结束」两个选择器。
+# 起点取 2020-01-01(早于本平台任何数据),终点取 now,所以默认等于全量、不会藏掉新数据。
+TIME_FILTER_DEFAULT = "2020-01-01T00:00:00 : now"
+
+# 时间范围占位:看板顶部的原生 Time range 过滤器就是靠它落到 SQL 上的 ——
+# 后端 (superset/common/query_context_factory.py::_apply_filters) 把图里
+# 每个 TEMPORAL_RANGE 过滤器的值换成用户选的起止区间;图里**没有**这个占位,
+# 时间过滤器选了也不会作用到该图。"No filter" = 不限时间(默认全量)。
+TIME_RANGE_FILTER = {
+    "expressionType": "SIMPLE",
+    "subject": "transaction_date",
+    "operator": "TEMPORAL_RANGE",
+    "comparator": "No filter",
+    "clause": "WHERE",
+    "filterOptionName": "filter_transaction_date_range",
+}
 
 LATEST_FILTER = {  # is_latest = true:产品/门店维“当前库存”只取每店每品最新一期
     "expressionType": "SIMPLE",
@@ -164,15 +216,25 @@ def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
 # ---------------------------------------------------------------------------
 # 7 张图的 (viz_type, form_data, query_context) 定义
 # ---------------------------------------------------------------------------
-def chart_defs(ds_id, ds_geo):
+# 时间范围过滤器只挂在“流量”图上(销售是流量,跨期可加)。
+# 库存/DOS 三张图按 is_latest 只取每店每品的最新快照 —— is_latest 是在视图里对
+# **全量**数据算的,选一个历史区间会把最新快照整个排除掉、图变空,所以这三张图
+# 不带 TEMPORAL_RANGE 占位,也在下面 native_filter 里被排除出时间过滤器的范围。
+SNAPSHOT_CHARTS = {
+    "Current Inventory by Series",
+    "DOS (days, 4-week demand)",
+    "DOS by SKU (4-week demand)",
+}
+
+
+def chart_defs(ds_id, skus):
     common = {"datasource": f"{ds_id}__table", "url_params": {}}
-    geo = {"datasource": f"{ds_geo}__table", "url_params": {}}
 
     # A 「SI 周趋势」折线时序（Purchase 口径暂不展示）
     a_fd = {**common, "viz_type": "echarts_timeseries_line",
             "x_axis": "transaction_date", "granularity_sqla": "transaction_date",
             "time_grain_sqla": None,
-            "metrics": [S, I], "groupby": [], "adhoc_filters": [],
+            "metrics": [S, I], "groupby": [], "adhoc_filters": [TIME_RANGE_FILTER],
             "row_limit": 10000, "x_axis_sort_asc": True,
             "show_legend": True, "markerEnabled": True}
     a_qc = query_context(ds_id, a_fd, columns=["transaction_date"],
@@ -183,7 +245,7 @@ def chart_defs(ds_id, ds_geo):
     # B 「各系列销售」柱状(类别轴 = 系列 Z1/Z7/X10 —— SKU 之上一层)
     b_fd = {**common, "viz_type": "echarts_timeseries_bar",
             "x_axis": "product_series", "metrics": [S], "groupby": [],
-            "adhoc_filters": [], "row_limit": 100, "show_legend": True}
+            "adhoc_filters": [TIME_RANGE_FILTER], "row_limit": 100, "show_legend": True}
     b_qc = query_context(ds_id, b_fd, columns=["product_series"], metrics=[S],
                          x_axis="product_series", orderby=[[S, False]])
 
@@ -214,36 +276,67 @@ def chart_defs(ds_id, ds_geo):
     # F 「销售 按系列→SKU」表格：SKU 列以编码开头，统一按编码升序。
     f_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
             "groupby": ["product_series", "sku"], "metrics": [S],
-            "adhoc_filters": [], "row_limit": 1000,
+            "adhoc_filters": [TIME_RANGE_FILTER], "row_limit": 1000,
             "order_by_cols": ['["sku", true]']}
     f_qc = query_context(ds_id, f_fd, columns=["product_series", "sku"],
                          metrics=[S], orderby=[["sku", True]])
 
-    # G 「Sale by Bundesland」表格(按德国联邦州统计 Sale;另 dataset = v_psi_bundesland)
-    g_fd = {**geo, "viz_type": "table", "query_mode": "aggregate",
+    # G 「Sale by Bundesland」表格(按德国联邦州统计 Sale)。
+    # bundesland 现在是 mart.v_psi 的一列(007),不再需要单独的 v_psi_bundesland 数据集;
+    # 全表同源后,门店不在 dim_store 的行也会计入((unknown) 州),与其余图总量一致。
+    g_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
             "groupby": ["bundesland"], "metrics": [SALE_BY_STATE, STORES],
-            "adhoc_filters": [], "row_limit": 50,
+            "adhoc_filters": [TIME_RANGE_FILTER], "row_limit": 50,
             "order_by_cols": ['["Sale (S)", false]']}
-    g_qc = query_context(ds_geo, g_fd, columns=["bundesland"], metrics=[SALE_BY_STATE, STORES],
+    g_qc = query_context(ds_id, g_fd, columns=["bundesland"], metrics=[SALE_BY_STATE, STORES],
                          orderby=[[SALE_BY_STATE, False]])
 
-    # 每张图带自己的 dataset id(关键:SO 图用 ds_geo,其余用 ds_id)——
-    # slice 的 datasource_id 必须与图内 params/query_context 的 dataset 一致,
-    # 否则看板渲染用 slice 的 dataset 取数 → "Columns missing in dataset"。
+    # H 「Sale by Shop」表格:一行一家门店(州/城市/邮编随行),先总销量、再每个 SKU 一列。
+    # 默认按总销量降序 = 门店销量排行;普通表格,点任意列头都能改排序。
+    # 分组带上 store_id:门店名在不同渠道/城市有重名,只按名字分组会把两家店并成一行。
+    # 注:SKU 列是构建时按库里实际 SKU 生成的条件求和;总销量 SUM(sale_qty) 不依赖这份
+    # 名单,所以万一有新 SKU 在两次 deploy 之间冒出来,总数仍然是全的,只是暂时少一列。
+    h_metrics = [SALE_BY_SHOP] + sku_metrics(skus)
+    h_fd = {**common, "viz_type": "table", "query_mode": "aggregate",
+            "groupby": ["store_id", "store_name", "bundesland", "city", "plz"],
+            "metrics": h_metrics, "adhoc_filters": [TIME_RANGE_FILTER],
+            "row_limit": 1000,
+            "order_by_cols": ['["Sale (S)", false]']}
+    h_qc = query_context(ds_id, h_fd,
+                         columns=["store_id", "store_name", "bundesland", "city", "plz"],
+                         metrics=h_metrics, orderby=[[SALE_BY_SHOP, False]])
+
+    # 每张图带 dataset id:slice 的 datasource_id 必须与图内 params/query_context 的
+    # dataset 一致,否则看板渲染用 slice 的 dataset 取数 → "Columns missing in dataset"。
+    # 返回顺序 = 看板上的纵向顺序(position_json 按这个顺序贪心排行)。
     return [
-        ("Expert Overall – Weekly Sale & Inventory", "echarts_timeseries_line", ds_id, a_fd, a_qc),
+        ("Weekly Sale & Inventory", "echarts_timeseries_line", ds_id, a_fd, a_qc),
         ("Sale by Series", "echarts_timeseries_bar", ds_id, b_fd, b_qc),
+        # 销量三张明细自上而下:门店 → 联邦州 → 系列/SKU
+        ("Sale by Shop", "table", ds_id, h_fd, h_qc),
+        ("Sale by Bundesland", "table", ds_id, g_fd, g_qc),
+        ("Sale by Series / SKU", "table", ds_id, f_fd, f_qc),
+        # 库存 / DOS 三张(按 is_latest 最新快照)
         ("Current Inventory by Series", "pie", ds_id, c_fd, c_qc),
         ("DOS (days, 4-week demand)", "big_number_total", ds_id, d_fd, d_qc),
         ("DOS by SKU (4-week demand)", "table", ds_id, e_fd, e_qc),
-        ("Sale by Series / SKU", "table", ds_id, f_fd, f_qc),
-        ("Sale by Bundesland", "table", ds_geo, g_fd, g_qc),
     ]
 
 
 # ---------------------------------------------------------------------------
-# 看板布局:每行 2 张(宽 6);某行只剩 1 张则整行铺满(宽 12)。对任意张数通用。
+# 看板布局:按 chart_defs 的返回顺序自上而下排 —— 明细表(FULL_WIDTH_CHARTS)独占
+# 一整行,其余图两张一行(各占宽 6);行尾落单的图铺满整行。
+# 想挪图的位置,改 chart_defs 的返回顺序即可,这里不用动。
 # ---------------------------------------------------------------------------
+# 三张表列多,半宽会把列挤成一团,固定全宽。
+FULL_WIDTH_CHARTS = {
+    "Sale by Series / SKU",
+    "DOS by SKU (4-week demand)",
+    "Sale by Bundesland",
+    "Sale by Shop",
+}
+
+
 def position_json(chart_ids, chart_names):
     pos = {
         "DASHBOARD_VERSION_KEY": "v2",
@@ -251,112 +344,122 @@ def position_json(chart_ids, chart_names):
         "HEADER_ID": {"type": "HEADER", "id": "HEADER_ID",
                       "meta": {"text": DASH_TITLE}},
     }
-    n = len(chart_ids)
-    # DOS/Sale 两张 SKU 明细表需要全宽，避免列被压缩。
-    full_width_indices = {4, 5}
+    # 先按顺序切行:全宽图自己一行,其余两张凑一行。
+    rows, current = [], []
+    for idx, name in enumerate(chart_names):
+        if name in FULL_WIDTH_CHARTS:
+            if current:
+                rows.append(current); current = []
+            rows.append([idx])
+            continue
+        current.append(idx)
+        if len(current) == 2:
+            rows.append(current); current = []
+    if current:
+        rows.append(current)
+
     row_ids = []
-    for idx, (cid, name) in enumerate(zip(chart_ids, chart_names)):
-        # 前四张图保持每行两张；SKU 明细表各占一整行。
-        row_no = idx // 2 if idx < 4 else idx - 2
+    for row_no, row in enumerate(rows):
         row_id = f"ROW-{row_no}"
-        if row_id not in pos:
-            pos[row_id] = {"type": "ROW", "id": row_id, "children": [],
-                           "parents": ["ROOT_ID", "GRID_ID"],
-                           "meta": {"background": "BACKGROUND_TRANSPARENT"}}
-            row_ids.append(row_id)
-        # 该行是否只有这一张(总数为奇数且是最后一张)→ 铺满
-        alone = idx in full_width_indices or (idx == n - 1 and idx % 2 == 0)
-        comp_id = f"CHART-{idx}"
-        pos[row_id]["children"].append(comp_id)
-        pos[comp_id] = {
-            "type": "CHART", "id": comp_id, "children": [],
-            "parents": ["ROOT_ID", "GRID_ID", row_id],
-            "meta": {"chartId": cid, "uuid": None, "sliceName": name,
-                     "width": 12 if alone else 6, "height": 50},
-        }
+        row_ids.append(row_id)
+        pos[row_id] = {"type": "ROW", "id": row_id, "children": [],
+                       "parents": ["ROOT_ID", "GRID_ID"],
+                       "meta": {"background": "BACKGROUND_TRANSPARENT"}}
+        for idx in row:
+            comp_id = f"CHART-{idx}"
+            pos[row_id]["children"].append(comp_id)
+            pos[comp_id] = {
+                "type": "CHART", "id": comp_id, "children": [],
+                "parents": ["ROOT_ID", "GRID_ID", row_id],
+                "meta": {"chartId": chart_ids[idx], "uuid": None,
+                         "sliceName": chart_names[idx],
+                         "width": 12 // len(row), "height": 50},
+            }
     pos["GRID_ID"] = {"type": "GRID", "id": "GRID_ID",
                       "children": row_ids, "parents": ["ROOT_ID"]}
     return pos
 
 
-def native_filter_configuration(ds_id, chart_ids):
-    """四个原生过滤器：Company → SKU（级联）、PLZ、Display（陈列档位）。
+def native_filter_configuration(ds_id, chart_ids, chart_names):
+    """七个原生过滤器,按显示顺序:
 
-    company 先选后，SKU 下拉只显示该公司实际拥有的产品名称；不选 SKU 时，所有
-    图即展示该 company 的全部 SKU 汇总。
+        Time range → Company → SKU → Bundesland → City → PLZ → Display
 
-    PLZ 是门店邮编（mart.v_psi.plz，来自 dim_store）。Superset 4.1 的原生过滤器
-    没有自由文本输入类型，Value 过滤器开 searchAllOptions（"Dynamically search all
-    filter values"）就是"手输邮编 → 下拉命中 → 选中"最接近的形态。注意少数 PLZ
-    下有 2 家门店（201 店 / 198 个不同 PLZ），选中会同时命中它们。
+    · Time range(filter_time):起止日期,默认值 TIME_FILTER_DEFAULT 让控件直接停在
+      Custom 帧(点开就是两个日期框,不用先选 RANGE TYPE)。它不绑定某一列,而是下推一个
+      time_range,由各图里的 TEMPORAL_RANGE 占位(TIME_RANGE_FILTER,列 = transaction_date)
+      落到 SQL 上。**范围排除库存/DOS 三张快照图**(SNAPSHOT_CHARTS):它们按 is_latest 只
+      取最新一期,选历史区间只会得到空图 —— 见 chart_defs 上方的说明。
+    · Company → SKU 级联:选了公司,SKU 下拉只列该公司实际有的产品名;不选 SKU 时
+      图就是该公司全部 SKU 的汇总。
+    · Bundesland(mart.v_psi.bundesland,门店 PLZ 连 core.plz_bundesland,008/007):
+      16 个州 + (unknown),取值少,全量预取。
+    · City(mart.v_psi.city,来自 dim_store)级联在 Bundesland 之下:选了州,城市
+      下拉只列该州的城市;城市有两百来个,开 searchAllOptions 支持手输搜索。
+    · PLZ 级联在 Bundesland + City 之下:选了州/城市,PLZ 下拉(以及手输搜索的结果)
+      只在该范围内的邮编里出。它是门店邮编(mart.v_psi.plz,来自 dim_store)。Superset 4.1 的原生过滤器
+      没有自由文本输入类型,Value 过滤器开 searchAllOptions("Dynamically search all
+      filter values")就是"手输邮编 → 下拉命中 → 选中"最接近的形态。注意少数 PLZ
+      下有 2 家门店(201 店 / 198 个不同 PLZ),选中会同时命中它们。
+    · Display 是陈列档位 Big / Small / Without Display(mart.v_psi.display_tier,
+      名单见 db/seed/{big,small}_display_plz.csv)。
 
-    Display 是陈列档位 Big / Small / Without Display（mart.v_psi.display_tier，
-    名单见 db/seed/{big,small}_display_plz.csv）。
-
-    范围：全部图，含"Sale by Bundesland"。州图数据集 mart.v_psi_bundesland 是
-    SELECT bundesland, v.* 派生的，company / product_name / plz / display_tier
-    四列同名继承，Superset 对 in-scope 的跨数据集图按列名下推 extraFormData。
+    七张图现在共用 mart.v_psi 一个数据集,过滤器按列名下推到范围内所有图都命中。
     """
-    psi_chart_ids = chart_ids
+    all_charts = list(chart_ids)
+    snapshot_ids = [cid for cid, nm in zip(chart_ids, chart_names) if nm in SNAPSHOT_CHARTS]
+    flow_charts = [cid for cid in chart_ids if cid not in snapshot_ids]
+
+    def value_filter(key, name, column, *, parents=(), search_all=False):
+        """Value(filter_select)过滤器,七个里有六个是这一种。"""
+        return {
+            "id": f"NATIVE_FILTER-{key}",
+            "name": name,
+            "filterType": "filter_select",
+            "targets": [{"datasetId": ds_id, "column": {"name": column}}],
+            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
+            "cascadeParentIds": list(parents),
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "type": "NATIVE_FILTER",
+            "chartsInScope": all_charts,
+            "tabsInScope": [],
+            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
+                              "searchAllOptions": search_all, "inverseSelection": False},
+        }
+
     return [
         {
-            "id": "NATIVE_FILTER-company",
-            "name": "Company",
-            "filterType": "filter_select",
-            "targets": [{"datasetId": ds_id, "column": {"name": "company"}}],
-            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
+            # 时间范围:targets 只给 datasetId(不绑列);默认 filterState 空 = 不限时间。
+            "id": "NATIVE_FILTER-time_range",
+            "name": "Time range",
+            "filterType": "filter_time",
+            "targets": [{"datasetId": ds_id}],
+            "defaultDataMask": {
+                "extraFormData": {"time_range": TIME_FILTER_DEFAULT},
+                "filterState": {"value": TIME_FILTER_DEFAULT},
+            },
             "cascadeParentIds": [],
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+            "scope": {"rootPath": ["ROOT_ID"], "excluded": snapshot_ids},
             "type": "NATIVE_FILTER",
-            "chartsInScope": psi_chart_ids,
+            "chartsInScope": flow_charts,
             "tabsInScope": [],
-            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
-                              "searchAllOptions": False, "inverseSelection": False},
+            "description": "起止日期;库存 / DOS 三张图按最新快照统计,不受时间范围影响",
+            "controlValues": {},
         },
-        {
-            "id": "NATIVE_FILTER-sku",
-            "name": "SKU",
-            "filterType": "filter_select",
-            "targets": [{"datasetId": ds_id, "column": {"name": "product_name"}}],
-            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
-            "cascadeParentIds": ["NATIVE_FILTER-company"],
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
-            "type": "NATIVE_FILTER",
-            "chartsInScope": psi_chart_ids,
-            "tabsInScope": [],
-            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
-                              "searchAllOptions": False, "inverseSelection": False},
-        },
-        {
-            "id": "NATIVE_FILTER-plz",
-            "name": "PLZ",
-            "filterType": "filter_select",
-            "targets": [{"datasetId": ds_id, "column": {"name": "plz"}}],
-            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
-            "cascadeParentIds": [],
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
-            "type": "NATIVE_FILTER",
-            "chartsInScope": psi_chart_ids,
-            "tabsInScope": [],
-            # searchAllOptions：下拉不预取全量，输入什么就去库里搜什么 —— 手输邮编定位单店。
-            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
-                              "searchAllOptions": True, "inverseSelection": False},
-        },
-        {
-            "id": "NATIVE_FILTER-display_tier",
-            "name": "Display",
-            "filterType": "filter_select",
-            "targets": [{"datasetId": ds_id, "column": {"name": "display_tier"}}],
-            "defaultDataMask": {"extraFormData": {}, "filterState": {"value": None}},
-            "cascadeParentIds": [],
-            "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
-            "type": "NATIVE_FILTER",
-            "chartsInScope": psi_chart_ids,
-            "tabsInScope": [],
-            # 只有三个取值，全量预取即可，不需要 searchAllOptions。
-            "controlValues": {"enableEmptyFilter": False, "multiSelect": True,
-                              "searchAllOptions": False, "inverseSelection": False},
-        },
+        value_filter("company", "Company", "company"),
+        value_filter("sku", "SKU", "product_name",
+                     parents=["NATIVE_FILTER-company"]),
+        value_filter("bundesland", "Bundesland", "bundesland"),
+        value_filter("city", "City", "city",
+                     parents=["NATIVE_FILTER-bundesland"], search_all=True),
+        # searchAllOptions:下拉不预取全量,输入什么就去库里搜什么 —— 手输邮编定位单店。
+        # 两个父级都要写:Superset 的级联只认**直接父级**、不传递,只挂 City 的话
+        # "只选了州、没选城市"时 PLZ 就收窄不了。
+        value_filter("plz", "PLZ", "plz",
+                     parents=["NATIVE_FILTER-bundesland", "NATIVE_FILTER-city"],
+                     search_all=True),
+        # 只有三个取值,全量预取即可,不需要 searchAllOptions。
+        value_filter("display_tier", "Display", "display_tier"),
     ]
 
 
@@ -383,7 +486,7 @@ if not db:
 db_id = db["id"]
 print(f"数据源 [{DB_NAME}] id={db_id}")
 
-# 3) 数据集:mart.v_psi(主)+ mart.v_psi_bundesland(按州 SO);存在则用之,否则创建
+# 3) 数据集:mart.v_psi(七张图共用);存在则用之,否则创建
 def ensure_dataset(schema, table):
     ds = next((d for d in list_all("dataset", token)
                if d.get("table_name") == table and d.get("schema") == schema), None)
@@ -400,22 +503,42 @@ def ensure_dataset(schema, table):
     # 从源同步列(视图改了列才认得;保留 is_dttm 等属性)。幂等且必须,
     # 否则按新列分组会报 "Columns missing in dataset"。
     call("PUT", f"/api/v1/dataset/{ds_id}/refresh", token=token, csrf=csrf, body={})
-    # 设主时间列(两个视图都含 transaction_date,时序图按周对齐)
+    # 设主时间列(时序图按周对齐;Time range 过滤器也要数据集有主时间列)
     call("PUT", f"/api/v1/dataset/{ds_id}", token=token, csrf=csrf,
          body={"main_dttm_col": "transaction_date"})
     return ds_id
 
 ds_id = ensure_dataset(SCHEMA, TABLE)
-ds_geo = ensure_dataset(SCHEMA, TABLE_GEO)
+
+
+# 3.5) 查库里实际有哪些 SKU —— 「Sale by Shop」每个 SKU 一列,列表跟着数据走,
+#      不写死在脚本里(新上市的 SKU 下次跑本脚本就自动多一列)。按编码升序,
+#      与「Sale by Series / SKU」「DOS by SKU」的排序口径一致。
+def fetch_skus(ds_id):
+    st, j = call("POST", "/api/v1/chart/data", token=token, csrf=csrf, body={
+        "datasource": {"id": ds_id, "type": "table"}, "force": False,
+        "result_format": "json", "result_type": "full",
+        "queries": [{"columns": ["sku"], "metrics": [S], "filters": [], "extras": {},
+                     "orderby": [["sku", True]], "row_limit": 1000}],
+        "form_data": {"datasource": f"{ds_id}__table", "viz_type": "table"},
+    })
+    if st != 200:
+        die(f"查 SKU 列表失败: {st} {j}")
+    return [r["sku"] for r in j["result"][0]["data"] if r.get("sku")]
+
+skus = fetch_skus(ds_id)
+print(f"SKU 列表({len(skus)} 个):" + ", ".join(s.split(" · ", 1)[-1] for s in skus))
 
 # 4) 图:存在(同名)则更新,否则创建
 existing_charts = {c["slice_name"]: c["id"] for c in list_all("chart", token)}
 # 图表改名时复用原 ID，保留既有 Explore/分享链接。
-for old_name, new_name in {"SO by Bundesland": "Sale by Bundesland"}.items():
+for old_name, new_name in {
+        "SO by Bundesland": "Sale by Bundesland",
+        "Expert Overall – Weekly Sale & Inventory": "Weekly Sale & Inventory"}.items():
     if new_name not in existing_charts and old_name in existing_charts:
         existing_charts[new_name] = existing_charts[old_name]
 chart_ids, chart_names = [], []
-for name, viz, chart_ds, fd, qc in chart_defs(ds_id, ds_geo):
+for name, viz, chart_ds, fd, qc in chart_defs(ds_id, skus):
     body = {
         "slice_name": name,
         "viz_type": viz,
@@ -459,7 +582,8 @@ dash_body = {
     "published": True,
     "position_json": json.dumps(pos, ensure_ascii=False),
     "json_metadata": json.dumps({
-        "native_filter_configuration": native_filter_configuration(ds_id, chart_ids),
+        "native_filter_configuration": native_filter_configuration(
+            ds_id, chart_ids, chart_names),
     }, ensure_ascii=False),
 }
 if dash:

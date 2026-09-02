@@ -10,10 +10,12 @@
 --   · core.plz_bundesland         参照表(plz 主键 → bundesland),CSV 即权威
 --   · core.plz_bundesland_stage   CSV 装载暂存(loader 用)
 --   · core.sync_plz_bundesland()  stage → 参照表(删/改增),CSV 即权威
---   · mart.v_psi_bundesland       v_psi + bundesland(门店 PLZ 连参照);BI 直用
---       —— SO 按州 = GROUP BY bundesland, SUM(sale_qty)
 --
--- 依赖:mart.v_psi(007)、mart.dim_store(006)。装载见 db/seed/load_plz_bundesland.sh。
+-- 消费方:mart.v_psi(007)末尾的 bundesland 列 LEFT JOIN 本文件建的 core.plz_bundesland
+--        —— 依赖方向与序号相反,**本文件必须先于 007 执行**(两个编排脚本都已按此排序)。
+--        兼容别名 mart.v_psi_bundesland(= v_psi)已拆到 018,那里才依赖 v_psi。
+--
+-- 依赖:core schema、bi_readonly 角色(004)。装载见 db/seed/load_plz_bundesland.sh。
 --
 -- 应用(幂等,可重复执行):
 --   docker compose exec -T postgres psql -U channelhub -d channelhub \
@@ -71,25 +73,8 @@ COMMENT ON FUNCTION core.sync_plz_bundesland() IS
   '把 stage 同步进 PLZ→州参照(CSV 即权威:CSV 没有的删除、其余 upsert),返回 删/改增/总数';
 
 -- ---------------------------------------------------------------------------
--- BI 视图:v_psi 挂上 bundesland(门店 PLZ → 州);grain 不变(店×品×周)+ 州属性。
--- 无映射(新 PLZ 未入参照)→ (unknown),不丢行。SO 按州 = SUM(sale_qty) group by bundesland。
--- ---------------------------------------------------------------------------
-CREATE OR REPLACE VIEW mart.v_psi_bundesland AS
-SELECT
-    coalesce(pb.bundesland, '(unknown)') AS bundesland,
-    v.*
-FROM mart.v_psi v
-JOIN mart.dim_store s
-  ON s.supplier_code = v.supplier_code AND s.store_id = v.store_id
-LEFT JOIN core.plz_bundesland pb
-  ON pb.plz = s.postal_code;
-COMMENT ON VIEW mart.v_psi_bundesland IS
-  'PSI + Bundesland(门店 PLZ 连 core.plz_bundesland);SO 按州 = GROUP BY bundesland, SUM(sale_qty)';
-
--- ---------------------------------------------------------------------------
 -- 只读授权(与其它 mart/core 对象一致)
 -- ---------------------------------------------------------------------------
 GRANT SELECT ON core.plz_bundesland TO bi_readonly;
-GRANT SELECT ON mart.v_psi_bundesland TO bi_readonly;
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE
   ON core.plz_bundesland, core.plz_bundesland_stage FROM bi_readonly;
