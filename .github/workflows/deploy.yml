@@ -28,9 +28,13 @@ jobs:
             cd ${{ secrets.DEPLOY_PATH }}
 
             echo "==> 拉取最新代码"
+            # fetch 之后用 merge --ff-only origin/main 快进,**别**再 git pull:
+            # pull 会再发起一次连接,公网 HTTPS 遇到失效/过期凭据时 GitHub 返 401,
+            # git 转而交互式索要用户名 —— 部署机没有 tty,直接 fatal(could not read
+            # Username)。objects 上一行 fetch 已经拿全了,快进不需要网络也不需要凭据。
             git fetch --prune origin
             git checkout main
-            git pull --ff-only origin main
+            git merge --ff-only origin/main
             echo "当前 commit: $(git rev-parse --short HEAD)"
 
             echo "==> 检查 .env 是否就位"
