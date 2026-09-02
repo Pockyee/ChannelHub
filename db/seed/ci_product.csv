@@ -1,0 +1,6 @@
+product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes
+hutt-10,HUTT,HUTT 10,HUTT 10,,true,true,\bhutt\b,\b(?:w\s*)?10\b,自家产品。市面写法有 Hutt 10 / HUTT Fensterputzroboter 10 / 偶见 W10;HUTT 另有 W8 等型号故必须带 10 的词边界。配件(Ersatztücher 等)由代码侧配件词黑名单排除
+ecovacs-w3-omni,ECOVACS,WINBOT W3 OMNI,ECOVACS WINBOT W3 OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw3\b,
+ecovacs-w2s-omni,ECOVACS,WINBOT W2S OMNI,ECOVACS WINBOT W2S OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw2s\b,
+ecovacs-w2-pro-omni,ECOVACS,WINBOT W2 PRO OMNI,ECOVACS WINBOT W2 PRO OMNI,,false,true,\b(?:ecovacs|winbot)\b,"\bw2\b[^a-z0-9]{0,4}pro\b",不得命中 W2 OMNI(另一款，不在跟踪范围)与 W2S OMNI
+ecovacs-winbot-mini,ECOVACS,WINBOT MINI,ECOVACS WINBOT MINI,,false,true,\b(?:ecovacs|winbot)\b,\bmini\b,型号 token 是 mini（不带 W 编号）；品牌闸门保证不会命中别家的 mini 产品

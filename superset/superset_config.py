@@ -9,7 +9,7 @@ import os
 # 会话签名 / 加密 — 必须稳定;改了之后已有会话失效、缓存失效。
 SECRET_KEY = os.environ["SUPERSET_SECRET_KEY"]
 
-# 元数据库（与 channelhub/metabase/prefect 共享同一个 Postgres 实例）
+# 元数据库（与 channelhub/prefect 共享同一个 Postgres 实例）
 SQLALCHEMY_DATABASE_URI = (
     "postgresql+psycopg2://"
     f"{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
@@ -32,3 +32,21 @@ FEATURE_FLAGS = {
 
 # 后台 cron 类任务我们暂时不开（不跑 celery worker）
 CELERY_CONFIG = None
+
+# ---------------------------------------------------------------------------
+# 环境标识：测试实例的标题要一眼可辨，否则两个看板长得一模一样，
+# 很容易对着测试数据下判断。默认 production —— 生产 .env 不设这项也不受影响。
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 表格里的可点击链接：Superset 默认 HTML_SANITIZATION=True，会把 <a> 上的
+# target / rel 属性剥掉 —— 结果是链接能点但在当前标签页内打开，看板就被顶掉了。
+# 这里只放行这两个属性，不放开 style/onclick 之类。渲染内容本身在
+# mart.v_ci_media_coverage 里已做 HTML 转义(标题来自抓取的外部网页)。
+# ---------------------------------------------------------------------------
+HTML_SANITIZATION_SCHEMA_EXTENSIONS = {
+    "attributes": {"a": ["target", "rel"]},
+}
+
+CHANNELHUB_ENV = os.environ.get("CHANNELHUB_ENV", "production").strip().lower()
+if CHANNELHUB_ENV != "production":
+    APP_NAME = f"ChannelHub [{CHANNELHUB_ENV.upper()}]"

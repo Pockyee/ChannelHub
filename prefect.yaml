@@ -44,3 +44,48 @@ deployments:
     # 无独立 cron：同样由 email-backup 收到新邮件后触发。
     # 回信是对外动作，不该在没有新邮件时空跑。
     schedules: []
+
+  - name: ci-price
+    entrypoint: flows/ci_price.py:ci_price
+    description: "竞品情报-价格层：Amazon/mydealz/eBay/idealo/Geizhals/MMS/Otto → raw.ci_offer + ci_listing_stat"
+    work_pool:
+      name: channelhub-pool
+    # 日频一次即可：本项目要的是**日粒度时间序列**(价格变动、评论数增速、BSR 变化)，
+    # 不是实时报价。加高频只会增加被封风险，不会让曲线更有信息量。
+    schedules:
+      - cron: "{{ $CI_PRICE_CRON }}"
+        timezone: "UTC"
+        active: true
+
+  - name: ci-social
+    entrypoint: flows/ci_social.py:ci_social
+    description: "竞品情报-讨论层：Reddit/YouTube/mydealz 评论/Amazon 评论 → raw.ci_mention"
+    work_pool:
+      name: channelhub-pool
+    schedules:
+      - cron: "{{ $CI_SOCIAL_CRON }}"
+        timezone: "UTC"
+        active: true
+
+  - name: ci-media
+    entrypoint: flows/ci_media.py:ci_media
+    description: "竞品情报-媒体层：Google News RSS 发现 → 正文抽取 → raw.ci_mention（周频）"
+    work_pool:
+      name: channelhub-pool
+    # 周频：该品类的德语评测总量极小，日频只会反复抓到同一批文章。
+    schedules:
+      - cron: "{{ $CI_MEDIA_CRON }}"
+        timezone: "UTC"
+        active: true
+
+  - name: ci-digest
+    entrypoint: flows/ci_digest.py:ci_digest
+    description: "竞品情报-简报层：raw.ci_mention → Claude → mart.ci_digest（周频）"
+    work_pool:
+      name: channelhub-pool
+    # 周一 07:00 UTC，排在 ci-media(06:00)之后 —— 简报要覆盖当周的媒体评测，
+    # 跑在采集前面就会漏掉最新一批。这是本文件里唯一有**跨 flow 顺序依赖**的排期。
+    schedules:
+      - cron: "{{ $CI_DIGEST_CRON }}"
+        timezone: "UTC"
+        active: true

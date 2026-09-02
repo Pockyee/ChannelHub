@@ -86,6 +86,30 @@ print("== 5) 回信里的附件不会被 parse-sell-through 当成订单导出�
 check(not ms.is_orders_export(out_name, out_bytes),
       "我们生成的 csv 不匹配订单导出签名（所以不会被回收入库）")
 
+print("== 6) 环境互锁：非生产环境**不可能**对外发信 ==")
+# 测试机跑的是同一套真实邮箱凭据（EMAIL_USER/SMTP_USER 指向真实业务邮箱），
+# 所以「测试环境给真实客户发信」必须在结构上不可能，而不是靠记得改一个开关
+# —— 那个开关恰恰最容易在从生产拷 .env 时被一起拷过来。
+_saved = (os.environ.get("CHANNELHUB_ENV"), os.environ.get("MAIL_SERVICE_DRY_RUN"))
+for env, dry, want, label in [
+    ("production", "false", False, "生产 + 显式 false → 真发信（正常业务不能被误锁）"),
+    ("production", "true",  True,  "生产 + true → dry run"),
+    ("production", "",      True,  "生产 + 空串 → dry run（compose 注入空串的坑）"),
+    (None,         "false", False, "未设 CHANNELHUB_ENV → 按 production（生产 .env 不动也不受影响）"),
+    ("test",       "false", True,  "**测试 + 显式 false 仍不发信**"),
+    ("TEST",       "false", True,  "环境名大小写不敏感"),
+    ("staging",    "false", True,  "任何非 production 值都锁死"),
+]:
+    os.environ.pop("CHANNELHUB_ENV", None)
+    if env is not None:
+        os.environ["CHANNELHUB_ENV"] = env
+    os.environ["MAIL_SERVICE_DRY_RUN"] = dry
+    check(ms._dry_run() is want, label, f"实得 dry_run={ms._dry_run()}")
+for k, v in zip(("CHANNELHUB_ENV", "MAIL_SERVICE_DRY_RUN"), _saved):
+    os.environ.pop(k, None)
+    if v is not None:
+        os.environ[k] = v
+
 print()
 if failures:
     print(f"✗ {len(failures)} 项未通过")

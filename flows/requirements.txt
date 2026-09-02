@@ -3,3 +3,21 @@
 minio>=7.2,<8
 openpyxl>=3.1,<4
 psycopg[binary]>=3.1,<4
+
+# ---- 竞品情报采集(ci_*.py)------------------------------------------------
+# httpx:官方 API 与普通 HTTP;prefect 已依赖它，此处显式声明意图
+httpx>=0.27,<1
+# curl_cffi:TLS 指纹伪装，对付 DataDome/Cloudflare —— 比开浏览器便宜两个数量级
+curl_cffi>=0.7,<1
+# trafilatura:媒体文章去模板抽正文(德语表现好)
+trafilatura>=1.12,<3
+# 说明:Reddit 与 YouTube 刻意不引 praw / google-api-python-client ——
+#      两者各只是「一个 token + 一个 GET」，用 httpx 直连，少两个重依赖。
+#      RSS 用标准库 xml.etree，HTML 结构化数据走 JSON-LD，故不需 feedparser/selectolax。
+
+# ---- LLM 简报(ci_digest.py)-------------------------------------------------
+# anthropic:这个破例引官方 SDK(其余 API 源都用 httpx 直连)。理由是它不只是
+#   「一个 token + 一个 GET」——重试退避、错误分类、count_tokens、拒答兜底
+#   都在 SDK 里，手搓一遍不划算。注意它依赖 httpx2(不是上面的 httpx)，两者
+#   是不同的包名，可以共存。
+anthropic>=1.0,<2

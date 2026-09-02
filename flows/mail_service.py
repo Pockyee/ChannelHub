@@ -80,13 +80,25 @@ def _pg():
     )
 
 
+def _is_production() -> bool:
+    """CHANNELHUB_ENV 未设置/空串一律按 **production** —— 生产的 .env 不动也不受影响。"""
+    return (_env("CHANNELHUB_ENV") or "production").lower() == "production"
+
+
 def _dry_run() -> bool:
     """只有显式写 false 才真发信；未设置/空串/乱填一律当 dry run。
 
     安全侧必须是「不发」：compose 里 ${MAIL_SERVICE_DRY_RUN} 在 .env 缺这一项时
     会注入**空串**（键存在但为空），os.environ.get 的默认值这时不生效 —— 用
     `== "true"` 判断的话，服务器上漏配一行就会静悄悄开始真发信。
+
+    ⚠️ **非生产环境无条件 dry run，MAIL_SERVICE_DRY_RUN=false 也翻不开。**
+    测试机跑的是同一套真实邮箱凭据（EMAIL_USER/SMTP_USER 指向真实业务邮箱），
+    「测试环境给真实客户发了信」必须在结构上不可能发生，而不是靠记得改一个开关
+    ——那个开关恰恰最容易在从生产拷 .env 时被一起拷过来。
     """
+    if not _is_production():
+        return True
     return (_env("MAIL_SERVICE_DRY_RUN") or "true").lower() != "false"
 
 
@@ -569,7 +581,11 @@ def handle_eml(object_key: str) -> dict:
 @flow(name="mail-service")
 def mail_service() -> dict:
     logger = get_run_logger()
-    if _dry_run():
+    if not _is_production():
+        logger.warning("CHANNELHUB_ENV=%s（非 production）—— **强制** dry run，"
+                       "本环境永不对外发信；MAIL_SERVICE_DRY_RUN 在此无效",
+                       _env("CHANNELHUB_ENV") or "(空)")
+    elif _dry_run():
         logger.warning("MAIL_SERVICE_DRY_RUN=true —— 照常生成与记账，但不实际发信")
 
     keys = list_eml_keys()
