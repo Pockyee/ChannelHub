@@ -1,0 +1,24 @@
+{
+  "jobComplete": true,
+  "jobReference": {"projectId": "demo", "jobId": "job_1", "location": "US"},
+  "schema": {"fields": [
+    {"name": "advertiser_id", "type": "STRING"}, {"name": "creative_id", "type": "STRING"},
+    {"name": "advertiser_name", "type": "STRING"}, {"name": "brand", "type": "STRING"},
+    {"name": "ad_format", "type": "STRING"}, {"name": "page_url", "type": "STRING"},
+    {"name": "first_shown", "type": "STRING"}, {"name": "last_shown", "type": "STRING"},
+    {"name": "shown_lower", "type": "INTEGER"}, {"name": "shown_upper", "type": "INTEGER"},
+    {"name": "surfaces", "type": "STRING", "mode": "REPEATED"}, {"name": "audience", "type": "STRING"}
+  ]},
+  "rows": [
+    {"f": [{"v": "AR01234567890123456789"}, {"v": "CR11111111111111111111"},
+           {"v": "ECOVACS ROBOTICS CO., LTD."}, {"v": "ECOVACS"}, {"v": "VIDEO"}, {"v": null},
+           {"v": "2026-09-05"}, {"v": "2026-09-26"}, {"v": "10000"}, {"v": "15000"},
+           {"v": [{"v": "YOUTUBE"}, {"v": "SEARCH"}]},
+           {"v": "{\"demographic_info\":\"Included\",\"geo_location\":\"Included\"}"}]},
+    {"f": [{"v": "AR01234567890123456789"}, {"v": "CR22222222222222222222"},
+           {"v": "ECOVACS ROBOTICS CO., LTD."}, {"v": "ECOVACS"}, {"v": "IMAGE"},
+           {"v": "https://adstransparency.google.com/advertiser/AR01234567890123456789/creative/CR22222222222222222222"},
+           {"v": "2026-06-01"}, {"v": "2026-06-30"}, {"v": null}, {"v": null},
+           {"v": []}, {"v": null}]}
+  ]
+}

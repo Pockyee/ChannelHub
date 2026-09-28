@@ -1,0 +1,46 @@
+{
+  "data": [
+    {
+      "id": "1234567890123456",
+      "ad_creation_time": "2026-09-01",
+      "ad_delivery_start_time": "2026-09-02",
+      "page_id": "111222333",
+      "page_name": "ECOVACS Robotics DE",
+      "publisher_platforms": ["FACEBOOK", "INSTAGRAM"],
+      "languages": ["de"],
+      "ad_creative_bodies": ["Der neue WINBOT W3 OMNI putzt deine Fenster von selbst.", "Der neue WINBOT W3 OMNI putzt deine Fenster von selbst."],
+      "ad_creative_link_titles": ["WINBOT W3 OMNI – jetzt bestellen"],
+      "ad_creative_link_descriptions": ["Nur bis Sonntag"],
+      "eu_total_reach": 48210,
+      "target_ages": ["25", "65+"],
+      "target_gender": "All",
+      "target_locations": [{"name": "Germany", "num_obfuscated": 0, "type": "countries", "excluded": false}],
+      "beneficiary_payers": [{"payer": "ECOVACS Europe GmbH", "beneficiary": "ECOVACS Europe GmbH"}]
+    },
+    {
+      "id": "2234567890123456",
+      "ad_creation_time": "2026-08-10",
+      "ad_delivery_start_time": "2026-08-10",
+      "ad_delivery_stop_time": "2026-08-31",
+      "page_id": "999888777",
+      "page_name": "Robot-Shop24",
+      "publisher_platforms": ["FACEBOOK"],
+      "ad_creative_bodies": ["ECOVACS Fensterroboter günstig bei uns"],
+      "eu_total_reach": 1200
+    },
+    {
+      "id": "3234567890123456",
+      "ad_creation_time": "2026-07-01",
+      "ad_delivery_start_time": "2026-07-01T08:00:00+0000",
+      "ad_delivery_stop_time": "2026-07-20T00:00:00+0000",
+      "page_id": "111222333",
+      "page_name": "ECOVACS Robotics DE",
+      "publisher_platforms": ["INSTAGRAM"],
+      "ad_creative_bodies": ["Sommer-Deals bei ECOVACS"]
+    }
+  ],
+  "paging": {
+    "cursors": {"after": "QVFI"},
+    "next": "https://graph.facebook.com/v26.0/ads_archive?access_token=SECRET_TOKEN&after=QVFI"
+  }
+}

@@ -303,6 +303,8 @@ services:
       CI_MEDIA_CRON: ${CI_MEDIA_CRON:-0 6 * * 1}
       # 简报排在 ci-media(周一 06:00)之后，确保当周媒体评测已入库
       CI_DIGEST_CRON: ${CI_DIGEST_CRON:-0 7 * * 1}
+      # 广告层周频（周一 06:30 UTC）；BigQuery 按扫描量计费，别调成日频
+      CI_ADS_CRON: ${CI_ADS_CRON:-30 6 * * 1}
     volumes:
       - ./flows:/app/flows:ro
       - ./prefect.yaml:/app/prefect.yaml:ro
@@ -386,6 +388,16 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       CI_DIGEST_WINDOW_DAYS: ${CI_DIGEST_WINDOW_DAYS:-7}
       CI_DIGEST_MAX_INPUT_TOKENS: ${CI_DIGEST_MAX_INPUT_TOKENS:-400000}
+      # ---- 广告层（ci_ads.py）----
+      META_AD_LIBRARY_TOKEN: ${META_AD_LIBRARY_TOKEN}
+      META_GRAPH_VERSION: ${META_GRAPH_VERSION:-v26.0}
+      GOOGLE_ADS_BQ_SA_JSON_B64: ${GOOGLE_ADS_BQ_SA_JSON_B64}
+      GOOGLE_ADS_BQ_PROJECT: ${GOOGLE_ADS_BQ_PROJECT}
+      CI_GOOGLE_ADS_MAX_GB: ${CI_GOOGLE_ADS_MAX_GB:-200}
+      CI_GOOGLE_ADS_ACTIVE_DAYS: ${CI_GOOGLE_ADS_ACTIVE_DAYS:-7}
+      CI_ADS_REGION: ${CI_ADS_REGION:-DE}
+      CI_ADS_LOOKBACK_DAYS: ${CI_ADS_LOOKBACK_DAYS:-365}
+      CI_ADS_MAX_PAGES: ${CI_ADS_MAX_PAGES:-20}
     volumes:
       - ./flows:/app/flows:ro
     depends_on:

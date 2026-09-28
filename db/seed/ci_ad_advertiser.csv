@@ -1,0 +1,4 @@
+source_code,advertiser_id,brand,advertiser_name,active,notes
+google_ads,AR06907559008387727361,ECOVACS,ECOVACS EUROPE GMBH,true,2026-09-28 discover 确认:官方欧洲主体
+google_ads,AR04559643642003718145,ECOVACS,ECOVACS EUROPE GMBH,true,2026-09-28 discover 确认:官方欧洲主体(第二个账户)
+google_ads,*,HUTT,,false,按名检索全是同名公司(画廊/牙科/T恤店等 14 个);确认官方广告主 id 后以 active=true 登记并删掉本行。候选:HUTT Ltd AR16809284089847742465 待确认

@@ -45,6 +45,8 @@ IDEMPOTENT_MIGRATIONS=(
   db/migrations/015_ci_instagram.sql
   db/migrations/016_ci_digest.sql
   db/migrations/017_ci_mention_detail.sql
+  # 广告层:依赖 012 的 core.ci_source / core.ci_product
+  db/migrations/019_ci_ads.sql
 )
 
 # 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。
@@ -53,6 +55,7 @@ BI_SEED_LOADERS=(
   db/seed/load_plz_bundesland.sh
   db/seed/load_display_plz.sh
   db/seed/load_ci_product.sh
+  db/seed/load_ci_ad_advertiser.sh
 )
 
 if [[ ! -f .env ]]; then

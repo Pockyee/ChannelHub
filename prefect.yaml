@@ -89,3 +89,15 @@ deployments:
       - cron: "{{ $CI_DIGEST_CRON }}"
         timezone: "UTC"
         active: true
+
+  - name: ci-ads
+    entrypoint: flows/ci_ads.py:ci_ads
+    description: "竞品情报-广告层：Meta Ad Library API + Google Ads Transparency(BigQuery) → raw.ci_ad（周频）"
+    work_pool:
+      name: channelhub-pool
+    # 周频：两个源给的都是广告生命周期累计值，周粒度足够回答「谁在投、投了多久」。
+    # Google 走 BigQuery 按扫描量计费（creative_stats 约 150 GB/次），日频会吃掉免费额度。
+    schedules:
+      - cron: "{{ $CI_ADS_CRON }}"
+        timezone: "UTC"
+        active: true

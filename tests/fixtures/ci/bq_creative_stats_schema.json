@@ -1,0 +1,27 @@
+{"schema": {"fields": [
+  {"name": "advertiser_id", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "creative_id", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "creative_page_url", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "ad_format_type", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "advertiser_disclosed_name", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "advertiser_legal_name", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "topic", "type": "STRING", "mode": "NULLABLE"},
+  {"name": "region_stats", "type": "RECORD", "mode": "REPEATED", "fields": [
+    {"name": "region_code", "type": "STRING", "mode": "NULLABLE"},
+    {"name": "first_shown", "type": "STRING", "mode": "NULLABLE"},
+    {"name": "last_shown", "type": "STRING", "mode": "NULLABLE"},
+    {"name": "times_shown_lower_bound", "type": "INTEGER", "mode": "NULLABLE"},
+    {"name": "times_shown_upper_bound", "type": "INTEGER", "mode": "NULLABLE"},
+    {"name": "surface_serving_stats", "type": "RECORD", "mode": "NULLABLE", "fields": [
+      {"name": "surface_serving_stats", "type": "RECORD", "mode": "REPEATED", "fields": [
+        {"name": "surface", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "times_shown_lower_bound", "type": "INTEGER", "mode": "NULLABLE"},
+        {"name": "times_shown_upper_bound", "type": "INTEGER", "mode": "NULLABLE"}
+      ]}
+    ]}
+  ]},
+  {"name": "audience_selection_approach_info", "type": "RECORD", "mode": "NULLABLE", "fields": [
+    {"name": "demographic_info", "type": "STRING", "mode": "NULLABLE"},
+    {"name": "geo_location", "type": "STRING", "mode": "NULLABLE"}
+  ]}
+]}}

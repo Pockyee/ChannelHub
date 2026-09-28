@@ -19,6 +19,7 @@
 #   ci_listing_stat  (source_code, product_id, observed_on)
 #   ci_mention       (source_code, external_id, product_id)
 #   ci_unmatched     (source_code, external_id)
+#   ci_ad            (source_code, ad_id)       —— 广告层(019);目标端需已应用 019
 # 两边都已存在的行以**目标端为准**(ON CONFLICT DO NOTHING),绝不原地覆盖 ——
 # raw 层是 append-only 历史留痕,同步只补缺不改旧。整份导入跑在一个事务里,
 # 任一表出错整笔回滚,不会出现"价格进了、提及没进"的半套状态。
@@ -40,7 +41,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-TABLES=(ci_offer ci_listing_stat ci_mention ci_unmatched)
+TABLES=(ci_offer ci_listing_stat ci_mention ci_unmatched ci_ad)
 
 envval() { grep -E "^$1=" .env 2>/dev/null | cut -d= -f2- | head -1; }
 PG_USER="$(envval POSTGRES_USER)"; PG_USER="${PG_USER:-channelhub}"

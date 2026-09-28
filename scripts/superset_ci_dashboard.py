@@ -5,18 +5,22 @@
   · scripts/superset_setup.py 已跑过(存在数据源 "ChannelHub")
 
 做四件事(全部幂等:存在则更新,不存在则创建):
-  1) 注册 3 个数据集:v_ci_compare(主) / v_ci_share_of_voice / v_ci_mention_detail
-  2) 建 3 张图,每张独占一行:
+  1) 注册 4 个数据集:v_ci_compare(主) / v_ci_share_of_voice / v_ci_mention_detail /
+     v_ci_ad_detail(广告层,019)
+  2) 建 5 张图,每张独占一行:
        A Price Trend by Model      折线时序,按产品分组;只画有报价的日子,
                                    横轴按实际数据起止拉伸(视图里的纯提及日
                                    best_total_eur 为 NULL,不过滤会把横轴撑到 2025)
        B Mentions per Week         柱状     —— 提及量
        C Mentions                  表格     —— 全部提及,按 mention_kind 切档
                                               (test/promo/media_review/discussion)
+       D Ads per Week              柱状     —— 按开投周计新广告数,按品牌分色
+       E Ads                       表格     —— Meta + Google 广告明细,可点开原广告
      (图表名与指标标签一律英文:看板是给人看的对外产物,注释保持中文)
   3) 组装成看板「Competitive Intelligence」(slug=competitive-intel),带两个原生过滤器:
        · Price window  —— 只作用于 A 图的时间区间,相对今天倒推,默认最近 30 天(含今天)
        · Mention kind  —— 提及表切档
+       · Ad platform   —— 只作用于 D/E 两张广告图,Meta / Google 切换
   4) 把图挂到看板;并清理被改名/移除的旧图(声明式)
 
 口径说明见 db/migrations/014_ci_mart.sql 与 docs/COMPETITIVE_INTEL.md:
@@ -56,6 +60,7 @@ DATASETS = {                      # 表名 → 主时间列
     "v_ci_compare": "observed_on",
     "v_ci_share_of_voice": "mention_week",
     "v_ci_mention_detail": "published_at",
+    "v_ci_ad_detail": "first_shown",          # 广告层(019)
 }
 
 
@@ -104,6 +109,7 @@ def m(col, label, agg="SUM", opt=None):
 
 BEST_PRICE = m("best_total_eur", "Best Price (€)", agg="MIN", opt="metric_best_price")
 MENTION_CNT = m("mention_cnt", "Mentions", agg="SUM", opt="metric_mention_cnt")
+AD_CNT = m("ad_id", "New Ads", agg="COUNT", opt="metric_ad_cnt")
 
 
 def flt(subject, op, comparator, name):
@@ -150,19 +156,21 @@ def chart_defs(ids):
     cmp_id = ids["v_ci_compare"]
     sov_id = ids["v_ci_share_of_voice"]
     det_id = ids["v_ci_mention_detail"]
+    ad_id = ids["v_ci_ad_detail"]
     out = []
 
-    def ts(name, ds_id, x, metric, filters, *, invert=False, series="line", fmt=",.2f"):
+    def ts(name, ds_id, x, metric, filters, *, invert=False, series="line", fmt=",.2f",
+           groupby="display_name"):
         fd = {"datasource": f"{ds_id}__table", "url_params": {},
               "viz_type": "echarts_timeseries_" + series,
               "x_axis": x, "granularity_sqla": x, "time_grain_sqla": None,
-              "metrics": [metric], "groupby": ["display_name"],
+              "metrics": [metric], "groupby": [groupby],
               "adhoc_filters": filters, "row_limit": 10000,
               "x_axis_sort_asc": True, "show_legend": True,
               "markerEnabled": True, "rich_tooltip": True,
               "y_axis_format": fmt, "y_axis_reverse": invert,
               "seriesType": series}
-        qc = query_context(ds_id, fd, columns=[x, "display_name"], metrics=[metric],
+        qc = query_context(ds_id, fd, columns=[x, groupby], metrics=[metric],
                            is_timeseries=True, x_axis=x, granularity=x,
                            orderby=[[x, True]])
         out.append((name, "echarts_timeseries_" + series, fd, qc))
@@ -179,19 +187,33 @@ def chart_defs(ids):
     # 靠看板上的 native filter 切档，不必为每一档单独建图。
     # title_link 是视图里拼好的 <a>；allow_render_html 打开后才会被渲染成链接，
     # 否则 Superset 把单元格当纯文本，屏幕上就是一串 <a href=…> 源码。
-    det_cols = ["published_on", "mention_kind", "display_name", "outlet", "title_link"]
-    det_fd = {"datasource": f"{det_id}__table", "url_params": {},
+    def table(name, ds_id, cols, order_col):
+        fd = {"datasource": f"{ds_id}__table", "url_params": {},
               "viz_type": "table", "query_mode": "raw",
-              "all_columns": det_cols,
+              "all_columns": cols,
               "allow_render_html": True,
               "adhoc_filters": [], "row_limit": 500,
-              "order_by_cols": ['["published_on", false]'],
+              "order_by_cols": [f'["{order_col}", false]'],
               "table_timestamp_format": "smart_date"}
-    det_qc = query_context(det_id, det_fd, columns=det_cols,
-                           metrics=[], row_limit=500,
-                           orderby=[["published_on", False]])
-    det_qc["queries"][0]["result_type"] = "results"
-    out.append(("CI · Mentions", "table", det_fd, det_qc))
+        qc = query_context(ds_id, fd, columns=cols, metrics=[], row_limit=500,
+                           orderby=[[order_col, False]])
+        qc["queries"][0]["result_type"] = "results"
+        out.append((name, "table", fd, qc))
+
+    table("CI · Mentions", det_id,
+          ["published_on", "mention_kind", "display_name", "outlet", "title_link"],
+          "published_on")
+
+    # 广告层(Meta Ad Library + Google Ads Transparency),呈现与 Mentions 对齐:
+    # 上面一张周柱状图(按开投周计新广告数,按品牌分色),下面一张可点击明细表。
+    # exposure 是带单位的文本 —— Meta 是覆盖人数(reach),Google 是展示次数
+    # (impressions),两者不可比,所以不做成可加总的数值列。
+    ts("CI · Ads per Week", ad_id, "ad_week", AD_CNT, [],
+       series="bar", fmt="SMART_NUMBER", groupby="brand")
+    table("CI · Ads", ad_id,
+          ["first_shown", "last_shown", "status", "platform", "brand", "advertiser_name",
+           "surfaces", "exposure", "products", "ad_link"],
+          "first_shown")
     return out
 
 
@@ -200,6 +222,8 @@ LAYOUT_ROWS = [
     {"charts": [0], "height": 60},           # 价格走势 —— 独占一行
     {"charts": [1], "height": 50},           # 声量柱状图 —— 独占一行
     {"charts": [2], "height": 70},           # 全量提及明细表 —— 独占一行
+    {"charts": [3], "height": 50},           # 广告周柱状图 —— 独占一行
+    {"charts": [4], "height": 70},           # 广告明细表 —— 独占一行
 ]
 
 
@@ -318,11 +342,38 @@ kind_filter = {
                  "column": {"name": "mention_kind"}}],
     "controlValues": {"multiSelect": True, "enableEmptyFilter": False,
                       "searchAllOptions": False, "inverseSelection": False},
-    "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+    "scope": {"rootPath": ["ROOT_ID"], "excluded": []},     # 下方按图名收窄
     "cascadeParentIds": [],
     "defaultDataMask": {"extraFormData": {}, "filterState": {}, "ownState": {}},
     "description": "test / promo / media_review / discussion / other",
 }
+# 广告平台切换(Meta / Google),只作用于两张广告图。
+platform_filter = {
+    "id": "NATIVE_FILTER-ci-ad-platform",
+    "name": "Ad platform",
+    "filterType": "filter_select",
+    "type": "NATIVE_FILTER",
+    "targets": [{"datasetId": ds_ids["v_ci_ad_detail"], "column": {"name": "platform"}}],
+    "controlValues": {"multiSelect": True, "enableEmptyFilter": False,
+                      "searchAllOptions": False, "inverseSelection": False},
+    "scope": {"rootPath": ["ROOT_ID"], "excluded": []},
+    "cascadeParentIds": [],
+    "defaultDataMask": {"extraFormData": {}, "filterState": {}, "ownState": {}},
+    "description": "Meta (Facebook/Instagram) / Google (YouTube/Search/…)",
+}
+
+
+def _scope_to(flt, names):
+    """把过滤器收窄到指定图:其余图全部 excluded。过滤器列只存在于对应数据集,
+    不收窄的话别的图会在看板上挂一个「不适用的过滤器」提示。"""
+    keep = [chart_ids[chart_names.index(n)] for n in names]
+    flt["scope"]["excluded"] = [c for c in chart_ids if c not in keep]
+    flt["chartsInScope"] = keep
+    flt["tabsInScope"] = []
+
+
+_scope_to(kind_filter, ["CI · Mentions"])
+_scope_to(platform_filter, ["CI · Ads per Week", "CI · Ads"])
 # 价格图的时间区间过滤:相对「今天」倒推(Last week / Last month / Last quarter /
 # 自定义),默认最近 30 天(含今天)。只作用于价格图 —— 声量柱状图与提及表用的是另一条时间
 # 列(mention_week / published_on),不该被同一个窗口截断。
@@ -352,7 +403,8 @@ price_time_filter = {
 dash_body = {"dashboard_title": DASH_TITLE, "slug": DASH_SLUG, "published": True,
              "position_json": json.dumps(pos, ensure_ascii=False),
              "json_metadata": json.dumps(
-                 {"native_filter_configuration": [price_time_filter, kind_filter]},
+                 {"native_filter_configuration": [price_time_filter, kind_filter,
+                                                  platform_filter]},
                  ensure_ascii=False)}
 if dash:
     dash_id = dash["id"]

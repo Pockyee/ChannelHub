@@ -21,3 +21,9 @@ trafilatura>=1.12,<3
 #   都在 SDK 里，手搓一遍不划算。注意它依赖 httpx2(不是上面的 httpx)，两者
 #   是不同的包名，可以共存。
 anthropic>=1.0,<2
+
+# ---- 广告层(ci_ads.py)-----------------------------------------------------
+# google-auth:只用来拿 service account 的 BigQuery token；查询本身走 httpx 直连 REST。
+#   刻意不引 google-cloud-bigquery —— 重,而我们只用 tables.get / jobs.query 两个接口。
+#   [requests] extra 是 google.auth.transport.requests 刷新 token 所需。
+google-auth[requests]>=2.29,<3

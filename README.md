@@ -20,7 +20,7 @@ Python 邮件 ETL、Prefect flow 与 Superset 报表。
 > 中固定为具体版本 tag。
 
 > 平台有两条数据线：**进销存**（邮件 → MinIO → `raw.sell_through_*` → `mart`）与
-> **竞品情报**（网页/API → MinIO → `raw.ci_*` → `mart.v_ci_*`，见
+> **竞品情报**（网页/API/广告库 → MinIO → `raw.ci_*` → `mart.v_ci_*`，见
 > [docs/COMPETITIVE_INTEL.md](docs/COMPETITIVE_INTEL.md)）。二者共用同一套
 > Postgres / MinIO / Prefect / Superset。
 >

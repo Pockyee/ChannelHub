@@ -198,6 +198,101 @@ Google News 的 `<link>` 是 `news.google.com/rss/articles/…` 跳转地址，
 
 ---
 
+## 广告层：Meta Ad Library + Google Ads Transparency（`ci-ads`）
+
+回答「竞品在哪投广告、投了多久、覆盖多大」。两家都只有**官方**入口，不抓网页：
+
+| 源 | 入口 | 能拿到 | 拿不到 |
+|---|---|---|---|
+| `meta_ads` | Graph API `/ads_archive`（Ad Library API） | 文案、投放起止、Facebook/Instagram 等投放面、**欧盟累计覆盖人数**、定向年龄/性别/地区、受益方与付款方 | 花费、互动 |
+| `google_ads` | BigQuery 公共数据集 `google_ads_transparency_center.creative_stats`（仅 EEA） | 首末展示日、**展示次数区间**、投放面（YouTube/Search/…）、素材格式、定向方式 | **文案**（点链接去透明度中心看）、花费 |
+
+欧盟的这些字段都来自 DSA（数字服务法）的透明度义务，所以只对欧盟投放的广告公开——
+查德国正好适用。落库 `raw.ci_ad`，看板用 `mart.v_ci_ad_detail`，
+图为 **CI · Ads per Week**（按开投周计新广告数）与 **CI · Ads**（明细，可点开原广告），
+看板顶部 **Ad platform** 过滤器切 Meta / Google。
+
+### 开通
+
+**Meta**（免费）：
+
+1. developers.facebook.com 建一个应用（类型选 Business 即可）。
+2. 在 facebook.com/ID 完成**身份确认**——Ad Library API 的硬前置，没做会报权限错误。
+3. Graph API Explorer 选该应用生成 user token，换成 60 天长期 token，填 `META_AD_LIBRARY_TOKEN`。
+   过期后 flow 告警 `api_auth_required`，换新 token 即可。
+
+**Google**（每月前 1 TiB 扫描免费）：
+
+1. 建一个 GCP 项目，启用 BigQuery API。
+2. 建 service account，授予 **BigQuery Job User**，下载 JSON key。
+3. `base64 -w0 sa-key.json` 的结果填 `GOOGLE_ADS_BQ_SA_JSON_B64`；
+   查询费记到哪个项目由 `GOOGLE_ADS_BQ_PROJECT` 决定（留空用 key 里的 project_id）。
+
+填完 `docker compose up -d prefect-worker`，手动跑一次：
+
+```bash
+docker compose exec prefect prefect deployment run 'ci-ads/ci-ads'
+```
+
+### 检索策略与广告主覆盖表
+
+默认**按品牌名**检索，品牌与判定正则直接复用 `core.ci_product.brand` / `brand_regex`：
+
+- Meta：`search_terms=<品牌>` 按文案命中，再要求**主页名**过品牌正则——转售商
+  （如「Robot-Shop24」投的 ECOVACS 广告）会被排掉，计入 `other_advertiser`。
+- Google：`advertiser_disclosed_name` 过品牌正则。
+
+想更准就在 `db/seed/ci_ad_advertiser.csv` 登记广告主。每行的 `active` 决定含义：
+
+| 行 | 含义 |
+|---|---|
+| 真实 id + `true` | **白名单**：该品牌在该源改为只按这些 id 精确取 |
+| 真实 id + `false` | **黑名单**：按名检索时排除这个广告主（同名公司） |
+| `*` + `false` | **禁用按名检索**：品牌名太常见，按名只会搜到同名公司时用 |
+
+配置收窄后，下一次 `ci-ads` 会顺带删掉 `raw.ci_ad` 里不再符合的旧行——状态型表不清理
+就会永远留着误报。不知道 id 先跑发现命令（只读，不写库），核对名称后把行粘进 CSV：
+
+```bash
+docker compose exec prefect-worker python flows/ci_ads.py discover            # 全部品牌
+docker compose exec prefect-worker python flows/ci_ads.py discover ECOVACS    # 只看一个
+bash db/seed/load_ci_ad_advertiser.sh
+```
+
+发现结果里主页名过不了品牌正则的行 `active` 标为 `false`，多半是转售商，人工决定要不要。
+
+2026-09-28 首次实跑的结论（已写进 CSV）：
+
+- **HUTT 在 Google 上按名检索不可用**：搜到 14 个广告主，全是 Enid Hutt Gallery、牙科诊所、
+  T 恤店之类的同名公司，首跑入库的 9 条全是误报，已用 `*` 禁用。唯一可能相关的是
+  `HUTT Ltd`（AR16809284089847742465），确认是自家后以 `true` 登记即可。
+- **ECOVACS 的 Google 广告主是 `ECOVACS EUROPE GMBH`**（两个 id，已登记白名单）。
+  数据集里只有 4 条视频素材，**全部只投法国**，德国为 0——Google 侧德国空是真实情况，
+  不是漏采。ECOVACS 的德国投放主要看 Meta。
+- 真实表里投放面字段叫 `surface`，不是早期资料里的 `surface_code`；首末展示日是 STRING。
+- 每次查询实际预估扫描约 70–85 GB，周频约 350 GB/月，在 1 TiB 免费额度内。
+
+### 为什么这样设计
+
+- **状态型 upsert，不是 append-only。** 两个源给的都是广告**生命周期累计值**，今天的值
+  严格包含昨天的；日快照只会堆出单调递增的重复行。唯一键 `(source_code, ad_id)`，
+  除 `first_seen_at` 外每次刷新。
+- **exposure 带单位，不做成可加总的数。** Meta 是覆盖**人数**，Google 是展示**次数**，
+  量纲不同，同一个数值列会诱导加总或比大小。
+- **Google 「在投」是推断的。** 数据集只有最后展示日，最近 `CI_GOOGLE_ADS_ACTIVE_DAYS`（默认 7）
+  天内还在展示即标 running。
+- **周频。** `creative_stats` 约 150 GB，BigQuery 按扫描量计费：周频约 600 GB/月，在免费额度内。
+  每次真查询前先 dryRun（免费）预估扫描量，超过 `CI_GOOGLE_ADS_MAX_GB`（默认 200）
+  就跳过并告警 `cost_guard`，绝不让一条改坏的 SQL 悄悄烧钱。
+- **Google 表结构运行时读取，不写死。** 公开资料里字段名互相矛盾（`creative_id` / `ad_id`），
+  Google 也可能改表。每次先读真实 schema、按候选名解析列；缺必需列告警 `schema_changed`
+  并跳过，不猜。可选列（如投放面）缺失只在日志里提示，对应字段留空。
+- **不存 MinIO 快照，绝不存带 token 的 URL。** Meta 的 `ad_snapshot_url` 与分页 `paging.next`
+  都内嵌 access_token：前者根本不请求，改存公开的 `facebook.com/ads/library/?id=`；
+  后者只在内存里跟随。两个源都能按 id 随时重取，不需要回溯重解析。
+- **Meta 文案会挂型号。** 文案过 `match_products_all()`，命中的型号进 `products` 列；
+  ECOVACS 的扫地机广告也会出现（品牌级检索），没挂型号的就是非擦窗机品类。
+
 ## 合规约定（写在 `flows/ci_common.py` 里，不是写在文档里就算）
 
 - **robots.txt 逐请求检查**。欧盟 DSM 第 4 条 TDM 例外依赖机器可读的 opt-out，
@@ -389,6 +484,7 @@ ORDER BY digest_on DESC LIMIT 1;
 | `ci-social` | 每日 05:30 | `CI_SOCIAL_CRON` |
 | `ci-media` | 每周一 06:00 | `CI_MEDIA_CRON` |
 | `ci-digest` | 每周一 07:00 | `CI_DIGEST_CRON` |
+| `ci-ads` | 每周一 06:30 | `CI_ADS_CRON` |
 
 ⚠️ `ci-digest` 是本项目唯一有**跨 flow 顺序依赖**的排期：它必须晚于 `ci-media`，
 否则简报会漏掉当周的媒体评测。改 `CI_MEDIA_CRON` 时记得一起看这条。
@@ -455,6 +551,8 @@ bash scripts/ci_sync_data.sh export \
 | `zero_matched` | 有候选但一条都没匹配上 | 消歧正则或产品主数据出问题，先跑 `check_ci_matching.py` |
 | `api_auth_required` | 接口要求鉴权/签名（如 mydealz 401） | 该源不可用；**0 条结果不代表市场上没有** |
 | `collect_failed` | 该源整体异常 | 看 Prefect UI 日志 |
+| `schema_changed` | Google `creative_stats` 缺必需列（广告层） | Google 改表了，按告警里的列名更新 `flows/ci_ads.py` 的候选名 |
+| `cost_guard` | BigQuery 预估扫描超上限（广告层） | 先确认 SQL 没改坏；确需更多再调 `CI_GOOGLE_ADS_MAX_GB` |
 
 **反爬墙必须显式失败**——`looks_like_bot_wall()` 在 200 响应里也识别验证码页，
 绝不允许静默存一条空记录当作「今天没数据」，那会在曲线上留下假的下跌。
