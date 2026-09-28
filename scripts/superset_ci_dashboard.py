@@ -6,22 +6,21 @@
 
 做四件事(全部幂等:存在则更新,不存在则创建):
   1) 注册 3 个数据集:v_ci_compare(主) / v_ci_share_of_voice / v_ci_mention_detail
-  2) 建 8 张图:
-       KPI 行 「自家最优价」「竞品最低价」「近 7 日提及」  大数字 ×3
-       A Price Trend by Model      折线时序,按产品分组
-       B Price Gap vs HUTT         折线时序,只看竞品(自家恒为 0)
-       C Amazon BSR (lower=better) 折线时序 —— 唯一的销量信号
-       D Mentions per Week         柱状     —— 提及量
-       E Mentions                  表格     —— 全部提及,按 mention_kind 切档
+  2) 建 3 张图,每张独占一行:
+       A Price Trend by Model      折线时序,按产品分组;只画有报价的日子,
+                                   横轴按实际数据起止拉伸(视图里的纯提及日
+                                   best_total_eur 为 NULL,不过滤会把横轴撑到 2025)
+       B Mentions per Week         柱状     —— 提及量
+       C Mentions                  表格     —— 全部提及,按 mention_kind 切档
                                               (test/promo/media_review/discussion)
      (图表名与指标标签一律英文:看板是给人看的对外产物,注释保持中文)
-  3) 组装成看板「Competitive Intelligence」(slug=competitive-intel)
+  3) 组装成看板「Competitive Intelligence」(slug=competitive-intel),带两个原生过滤器:
+       · Price window  —— 只作用于 A 图的时间区间,相对今天倒推,默认最近 30 天(含今天)
+       · Mention kind  —— 提及表切档
   4) 把图挂到看板;并清理被改名/移除的旧图(声明式)
 
 口径说明见 db/migrations/014_ci_mart.sql 与 docs/COMPETITIVE_INTEL.md:
   · best_total_eur = 跨源最低到手价(售价+运费)
-  · price_gap_vs_own_eur 正数 = 该款比我们贵;自家行恒为 0
-  · amazon_bsr 越小越好,故 C 图 Y 轴倒置
 
 价格类图在 db/seed/ci_product_alias.csv 填好各源商品标识、ci-price 跑过之前是空的,
 这是预期行为而非故障(见 docs/COMPETITIVE_INTEL.md「唯一的人工前置」)。
@@ -104,19 +103,17 @@ def m(col, label, agg="SUM", opt=None):
 
 
 BEST_PRICE = m("best_total_eur", "Best Price (€)", agg="MIN", opt="metric_best_price")
-GAP = m("price_gap_vs_own_eur", "Price Gap vs Us (€)", agg="AVG", opt="metric_gap")
-BSR = m("amazon_bsr", "Amazon BSR", agg="MIN", opt="metric_bsr")
-MENTIONS_7D = m("mentions_7d", "Mentions 7d", agg="MAX", opt="metric_mentions7d")
 MENTION_CNT = m("mention_cnt", "Mentions", agg="SUM", opt="metric_mention_cnt")
 
 
 def flt(subject, op, comparator, name):
+    op_id = {"==": "EQUALS", "IS NOT NULL": "IS_NOT_NULL"}[op]
     return {"expressionType": "SIMPLE", "subject": subject, "operator": op,
-            "comparator": comparator, "clause": "WHERE", "filterOptionName": name}
+            "operatorId": op_id, "comparator": comparator, "clause": "WHERE",
+            "filterOptionName": name}
 
 
-OWN_ONLY = flt("is_own", "==", True, "filter_is_own_true")
-COMP_ONLY = flt("is_own", "==", False, "filter_is_own_false")
+HAS_PRICE = flt("best_total_eur", "IS NOT NULL", None, "filter_has_price")
 
 
 def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
@@ -155,23 +152,6 @@ def chart_defs(ids):
     det_id = ids["v_ci_mention_detail"]
     out = []
 
-    def kpi(name, ds_id, metric, filters, fmt=",.2f", sub=""):
-        fd = {"datasource": f"{ds_id}__table", "url_params": {},
-              "viz_type": "big_number_total", "metric": metric,
-              "adhoc_filters": filters, "header_font_size": 0.4,
-              "subheader_font_size": 0.15, "y_axis_format": fmt,
-              "subheader": sub, "time_format": "smart_date"}
-        qc = query_context(ds_id, {**fd, "metrics": [metric]},
-                           columns=[], metrics=[metric], orderby=[])
-        out.append((name, "big_number_total", fd, qc))
-
-    kpi("CI · Our Best Price", cmp_id, BEST_PRICE, [OWN_ONLY],
-        sub="HUTT — lowest total price")
-    kpi("CI · Best Competitor Price", cmp_id, BEST_PRICE, [COMP_ONLY],
-        sub="ECOVACS — lowest total price")
-    kpi("CI · Mentions (7 days)", cmp_id, MENTIONS_7D, [],
-        fmt="SMART_NUMBER", sub="all products, all sources")
-
     def ts(name, ds_id, x, metric, filters, *, invert=False, series="line", fmt=",.2f"):
         fd = {"datasource": f"{ds_id}__table", "url_params": {},
               "viz_type": "echarts_timeseries_" + series,
@@ -187,12 +167,10 @@ def chart_defs(ids):
                            orderby=[[x, True]])
         out.append((name, "echarts_timeseries_" + series, fd, qc))
 
-    ts("CI · Price Trend by Model", cmp_id, "observed_on", BEST_PRICE, [])
-    # 自家行恒为 0,画进去只会压平竞品曲线
-    ts("CI · Price Gap vs HUTT", cmp_id, "observed_on", GAP, [COMP_ONLY])
-    # BSR 越小越好 → Y 轴倒置,让「向上」= 卖得更好
-    ts("CI · Amazon BSR (lower = better)", cmp_id, "observed_on", BSR, [],
-       invert=True, fmt="SMART_NUMBER")
+    # v_ci_compare 是「报价日 ∪ 提及日」的并集:只有提及没有报价的日子 best_total_eur
+    # 为 NULL。不过滤的话横轴会被 2025 年的提及行撑开,曲线前面一大段全是空的。
+    # 只画有价格的日子,横轴就按实际报价数据的起止拉伸。
+    ts("CI · Price Trend by Model", cmp_id, "observed_on", BEST_PRICE, [HAS_PRICE])
     ts("CI · Mentions per Week", sov_id, "mention_week", MENTION_CNT, [],
        series="bar", fmt="SMART_NUMBER")
 
@@ -219,11 +197,9 @@ def chart_defs(ids):
 
 # 看板布局:每行几张图 + 行高
 LAYOUT_ROWS = [
-    {"charts": [0, 1, 2], "height": 40},     # KPI 行
-    {"charts": [3, 4], "height": 60},        # 价格走势 + 价差
-    {"charts": [5], "height": 60},           # BSR(独占一行:半宽时柱子挤成一团)
-    {"charts": [6], "height": 50},           # 声量柱状图 —— 独占一行
-    {"charts": [7], "height": 70},           # 全量提及明细表 —— 独占一行
+    {"charts": [0], "height": 60},           # 价格走势 —— 独占一行
+    {"charts": [1], "height": 50},           # 声量柱状图 —— 独占一行
+    {"charts": [2], "height": 70},           # 全量提及明细表 —— 独占一行
 ]
 
 
@@ -347,10 +323,37 @@ kind_filter = {
     "defaultDataMask": {"extraFormData": {}, "filterState": {}, "ownState": {}},
     "description": "test / promo / media_review / discussion / other",
 }
+# 价格图的时间区间过滤:相对「今天」倒推(Last week / Last month / Last quarter /
+# 自定义),默认最近 30 天(含今天)。只作用于价格图 —— 声量柱状图与提及表用的是另一条时间
+# 列(mention_week / published_on),不该被同一个窗口截断。
+# filter_time 没有数据集目标,targets 固定写 [{}];作用范围用 excluded 排除其它图。
+PRICE_WINDOW_DEFAULT = ('DATEADD(DATETIME("today"), -30, day) : '
+                        'DATEADD(DATETIME("today"), 1, day)')
+price_chart_id = chart_ids[chart_names.index("CI · Price Trend by Model")]
+other_chart_ids = [c for c in chart_ids if c != price_chart_id]
+price_time_filter = {
+    "id": "NATIVE_FILTER-ci-price-window",
+    "name": "Price window",
+    "filterType": "filter_time",
+    "type": "NATIVE_FILTER",
+    "targets": [{}],
+    "controlValues": {},
+    "scope": {"rootPath": ["ROOT_ID"], "excluded": other_chart_ids},
+    "chartsInScope": [price_chart_id],
+    "tabsInScope": [],
+    "cascadeParentIds": [],
+    # 默认窗口不用内置的 "Last month":它的上界是今天零点,会把当天 05:00 采到的
+    # 点漏掉。显式写「今天-30 天 : 明天零点」,今天的报价也画进去。
+    "defaultDataMask": {"extraFormData": {"time_range": PRICE_WINDOW_DEFAULT},
+                        "filterState": {"value": PRICE_WINDOW_DEFAULT},
+                        "ownState": {}},
+    "description": "Price Trend only — relative to today (Last week / month / quarter / custom)",
+}
 dash_body = {"dashboard_title": DASH_TITLE, "slug": DASH_SLUG, "published": True,
              "position_json": json.dumps(pos, ensure_ascii=False),
              "json_metadata": json.dumps(
-                 {"native_filter_configuration": [kind_filter]}, ensure_ascii=False)}
+                 {"native_filter_configuration": [price_time_filter, kind_filter]},
+                 ensure_ascii=False)}
 if dash:
     dash_id = dash["id"]
     st, j = call("PUT", f"/api/v1/dashboard/{dash_id}", token=token, csrf=csrf, body=dash_body)

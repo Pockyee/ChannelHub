@@ -416,6 +416,34 @@ UPDATE core.ci_source SET active = false WHERE source_code = 'idealo';
 docker compose exec prefect prefect deployment run 'ci-price/ci-price'
 ```
 
+### 把本地积累的历史推到云端
+
+价格 delta 序列只能靠日频采样攒（见上）。本地机器往往比服务器更早开跑，
+或者服务器一直在 `CI_DRY_RUN=true` 干跑——这时本地 `raw.ci_*` 里的历史比云端完整，
+可以用 `scripts/ci_sync_data.sh` 一次性推上去，云端曲线立即补齐：
+
+```bash
+# 在本地执行；一条管道直达，不落临时文件
+bash scripts/ci_sync_data.sh export \
+  | ssh deploy@<服务器> 'cd /opt/channelhub && bash scripts/ci_sync_data.sh import -'
+```
+
+每张表回显 `received / inserted` 两列：`inserted` 是真正新增，差额即云端已有的行。
+幂等要点：
+
+- 搬 `ci_offer / ci_listing_stat / ci_mention / ci_unmatched` 四张事实表，
+  按各表 UNIQUE 约束 `ON CONFLICT DO NOTHING`——只补缺，**绝不覆盖**云端已有行，
+  重复跑 `inserted` 全为 0。整份导入在一个事务里，任一表失败整笔回滚。
+- `product_id` 是两边一致的文本短码（`core.ci_product` seed），无需重映射；
+  自增主键与 `total_cents` 生成列由目标端自己算。
+- `snapshot_id` 置 NULL：它指向源端 `raw.ci_snapshot` 的自增 id，云端对不上。
+  所有 `mart.v_ci_*` 视图都不用它，只影响「回溯重解析」——那需要连 MinIO
+  `ci-archive` 桶一起 `mc mirror`，不在脚本范围。
+- 不搬 `raw.ci_snapshot`、`core.ci_hashtag`（Instagram 配额账本按账号计，不能混）
+  和 `mart.ci_digest`。
+
+推完之后云端照常按排期采集，两边自然汇合；反方向（云端 → 本地）同样适用。
+
 ### 告警
 
 复用 `raw.ingest_alert` 去重表，主题前缀 `[ChannelHub]`，同一「源 × 原因」当天只发一次。
