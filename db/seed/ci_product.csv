@@ -1,6 +1,7 @@
-product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes
-hutt-10,HUTT,HUTT 10,HUTT 10,,true,true,\bhutt\b,\b(?:w\s*)?10\b,自家产品。市面写法有 Hutt 10 / HUTT Fensterputzroboter 10 / 偶见 W10;HUTT 另有 W8 等型号故必须带 10 的词边界。配件(Ersatztücher 等)由代码侧配件词黑名单排除
-ecovacs-w3-omni,ECOVACS,WINBOT W3 OMNI,ECOVACS WINBOT W3 OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw3\b,
-ecovacs-w2s-omni,ECOVACS,WINBOT W2S OMNI,ECOVACS WINBOT W2S OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw2s\b,
-ecovacs-w2-pro-omni,ECOVACS,WINBOT W2 PRO OMNI,ECOVACS WINBOT W2 PRO OMNI,,false,true,\b(?:ecovacs|winbot)\b,"\bw2\b[^a-z0-9]{0,4}pro\b",不得命中 W2 OMNI(另一款，不在跟踪范围)与 W2S OMNI
-ecovacs-winbot-mini,ECOVACS,WINBOT MINI,ECOVACS WINBOT MINI,,false,true,\b(?:ecovacs|winbot)\b,\bmini\b,型号 token 是 mini（不带 W 编号）；品牌闸门保证不会命中别家的 mini 产品
+product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes,kind
+hutt-10,HUTT,HUTT 10,HUTT 10,,true,true,\bhutt\b,\b(?:w\s*)?10\b,自家产品。市面写法有 Hutt 10 / HUTT Fensterputzroboter 10 / 偶见 W10;HUTT 另有 W8 等型号故必须带 10 的词边界。配件(Ersatztücher 等)由代码侧配件词黑名单排除,model
+ecovacs-w3-omni,ECOVACS,WINBOT W3 OMNI,ECOVACS WINBOT W3 OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw3\b,,model
+ecovacs-w2s-omni,ECOVACS,WINBOT W2S OMNI,ECOVACS WINBOT W2S OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw2s\b,,model
+ecovacs-w2-pro-omni,ECOVACS,WINBOT W2 PRO OMNI,ECOVACS WINBOT W2 PRO OMNI,,false,true,\b(?:ecovacs|winbot)\b,"\bw2\b[^a-z0-9]{0,4}pro\b",不得命中 W2 OMNI(另一款，不在跟踪范围)与 W2S OMNI,model
+ecovacs-winbot-mini,ECOVACS,WINBOT MINI,ECOVACS WINBOT MINI,,false,true,\b(?:ecovacs|winbot)\b,\bmini\b,型号 token 是 mini（不带 W 编号）；品牌闸门保证不会命中别家的 mini 产品,model
+ecovacs-winbot,ECOVACS,WINBOT,ECOVACS WINBOT (series),,false,true,\b(?:ecovacs|winbot)\b,"\bwinbot\b|fenster[\w-]{0,14}roboter|fensterputz|fensterreinig|window[- ]?(?:clean|robot)",系列兜底，只有 ci-media 用(按 brand+model 即「ECOVACS WINBOT」检索 Google News)。文章没命中任何 ECOVACS 型号时挂到这里：标题/摘要里有品牌且有品类词，或经本系列检索发现且标题有品类词。match_regex 是品类词不是型号 token —— 挡掉 Deebot/GOAT/泳池机等同品牌非擦窗新闻,series

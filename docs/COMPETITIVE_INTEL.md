@@ -196,6 +196,38 @@ Google News 的 `<link>` 是 `news.google.com/rss/articles/…` 跳转地址，
 想要某家的全文，把它的 feed 加进 `CI_MEDIA_EXTRA_FEEDS`（逗号分隔），
 链接指向出版方真实域名时会自动走 trafilatura 抽正文。
 
+### 系列兜底：横评标题不写型号也要收（`kind='series'`）
+
+按型号检索 + 标题/摘要里「品牌 AND 型号」判归属，会漏掉一整类最有价值的稿子：
+横评和品类稿的标题通常只写「Fensterputzroboter im Test – welches Gerät hat den
+Durchblick?」，不点名任何型号（Google News 的摘要又只是标题 + 媒体名）。
+2026-09-16 n-tv 那篇横评就是这样漏掉的——Google 在正文里命中了检索词，
+我们在标题里找不到型号，直接丢弃。
+
+`db/seed/ci_product.csv` 里 `kind=series` 的行（目前只有 `ecovacs-winbot`，
+看板显示为 `ECOVACS WINBOT (series)`）是系列兜底：
+
+- **只有 ci-media 用。** `load_products()` 默认只返回 `kind=model`，价格/社媒/广告层
+  不会拿系列名去搜；`load_ci_product.sh` 的缺标识清单也不列系列行。
+- **检索：** 按 `brand + model`（即 `ECOVACS WINBOT`）搜两次——全量一次，
+  外加 `when:14d` 近期窗口一次。单次检索只回 100 条且按相关度排，新稿容易被一年内的老稿挤掉。
+- **归属：** 文章没命中该品牌**任何型号**时，满足其一即挂到系列行：
+  1. 标题/摘要里有品牌（`brand_regex`）**且**有品类词；
+  2. 由本系列检索搜回（Google 在正文里命中了系列名）**且**标题有品类词。
+- **系列行的 `match_regex` 是品类词**（`winbot` / `Fenster…roboter` / `Fensterputz` / `Fensterreinig`），
+  不是型号 token。这道闸挡的是同品牌的非擦窗新闻（Deebot / GOAT 割草机 / 泳池机）。
+- 「命中型号」按品牌算：「Hutt ist Testsieger vor Ecovacs」挂上 `hutt-10` 的同时，
+  ECOVACS 一款没点名，照样挂 ECOVACS 系列。未跟踪的型号（如 W2 OMNI）也落系列。
+- 入库行的 `engagement.matched_by` 标 `series` / `model`，可据此区分：
+
+```sql
+SELECT published_at::date, title FROM raw.ci_mention
+WHERE product_id = 'ecovacs-winbot' ORDER BY published_at DESC;
+```
+
+给别的品牌加系列兜底：在 CSV 加一行 `kind=series`（`model` 填系列名，检索词就是
+`brand model`），`match_regex` 填品类词，然后在 `check_ci_matching.py` 第 11 节补断言。
+
 ---
 
 ## 广告层：Meta Ad Library + Google Ads Transparency（`ci-ads`）
@@ -365,7 +397,8 @@ docker run --rm -v "$PWD":/w -w /w channelhub-prefect-worker python scripts/chec
 ## 数据模型
 
 ```
-core.ci_product        产品主数据（自家 is_own=true + 竞品同表），CSV 即权威
+core.ci_product        产品主数据（自家 is_own=true + 竞品同表），CSV 即权威；
+                       kind=model 具体型号 / kind=series 媒体层系列兜底（见「系列兜底」）
 core.ci_product_alias  各源标识 → 产品；manual 行来自 CSV，regex/llm 行由 flow 写
 core.ci_source         源注册表；source_code 与 flow 里的常量一一对应
 

@@ -45,11 +45,20 @@ CREATE TABLE IF NOT EXISTS core.ci_product (
     active       boolean NOT NULL DEFAULT true,
     brand_regex  text,                      -- 品牌判定正则(ECOVACS 的机器常只写 WINBOT)
     match_regex  text,                      -- 型号判定正则(带词边界)，见文件头设计要点
-    notes        text
+    notes        text,
+    kind         text NOT NULL DEFAULT 'model'  -- 'model' 具体型号 | 'series' 系列兜底(只给媒体层用)
 );
 
 -- 已建表的实例前向补列(本迁移每次 deploy 重放，必须两条路径都成立)
 ALTER TABLE core.ci_product ADD COLUMN IF NOT EXISTS brand_regex text;
+ALTER TABLE core.ci_product ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'model';
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conrelid = 'core.ci_product'::regclass AND conname = 'ck_ci_product_kind') THEN
+    ALTER TABLE core.ci_product ADD CONSTRAINT ck_ci_product_kind CHECK (kind IN ('model','series'));
+  END IF;
+END $$;
 COMMENT ON TABLE core.ci_product IS
   '竞品情报产品主数据(自家 is_own=true + 竞品同表);由 db/seed/ci_product.csv 经 loader 同步';
 COMMENT ON COLUMN core.ci_product.brand_regex IS
@@ -57,12 +66,17 @@ COMMENT ON COLUMN core.ci_product.brand_regex IS
 COMMENT ON COLUMN core.ci_product.match_regex IS
   '型号判定正则(Python re 语法，IGNORECASE，非 SQL ~*);只匹配型号 token，品牌交给 brand_regex。'
   'W2/W2S/W2 PRO 互为前缀，必须带 \b 词边界;命中两款以上即判为歧义，进 raw.ci_unmatched 而不是猜';
+COMMENT ON COLUMN core.ci_product.kind IS
+  'model=具体型号(全部采集层都用);series=系列兜底行，只有 ci-media 用：按 display_name 检索 Google News，'
+  '文章没命中该品牌任何型号、但属于该系列时挂到这一行。load_products() 默认只返回 model，'
+  '价格/社媒/广告层不会拿系列行去搜。系列行的 match_regex 是「品类词」(擦窗机相关)，不是型号 token';
 
 CREATE TABLE IF NOT EXISTS core.ci_product_stage (
     product_id text, brand text, model text, display_name text,
-    ean text, is_own text, active text, brand_regex text, match_regex text, notes text
+    ean text, is_own text, active text, brand_regex text, match_regex text, notes text, kind text
 );
 ALTER TABLE core.ci_product_stage ADD COLUMN IF NOT EXISTS brand_regex text;
+ALTER TABLE core.ci_product_stage ADD COLUMN IF NOT EXISTS kind text;
 COMMENT ON TABLE core.ci_product_stage IS 'CSV 装载暂存(loader 专用，每次 TRUNCATE 后 \copy 灌入;非权威)';
 
 -- ---------------------------------------------------------------------------
@@ -110,7 +124,7 @@ BEGIN
     WITH up AS (
         INSERT INTO core.ci_product
             (product_id, brand, model, display_name, ean, is_own, active,
-             brand_regex, match_regex, notes)
+             brand_regex, match_regex, notes, kind)
         SELECT DISTINCT ON (btrim(product_id))
                btrim(product_id), btrim(brand), btrim(model), btrim(display_name),
                nullif(btrim(coalesce(ean,'')), ''),
@@ -118,7 +132,8 @@ BEGIN
                lower(btrim(coalesce(active,'true')))  NOT IN ('false','f','0','no'),
                nullif(btrim(coalesce(brand_regex,'')), ''),
                nullif(btrim(coalesce(match_regex,'')), ''),
-               nullif(btrim(coalesce(notes,'')), '')
+               nullif(btrim(coalesce(notes,'')), ''),
+               coalesce(nullif(lower(btrim(coalesce(kind,''))), ''), 'model')
         FROM core.ci_product_stage
         WHERE nullif(btrim(coalesce(product_id,'')), '') IS NOT NULL
           AND nullif(btrim(coalesce(brand,'')), '')      IS NOT NULL
@@ -133,7 +148,8 @@ BEGIN
             active       = EXCLUDED.active,
             brand_regex  = EXCLUDED.brand_regex,
             match_regex  = EXCLUDED.match_regex,
-            notes        = EXCLUDED.notes
+            notes        = EXCLUDED.notes,
+            kind         = EXCLUDED.kind
         RETURNING 1
     ) SELECT count(*) INTO _upserted FROM up;
 

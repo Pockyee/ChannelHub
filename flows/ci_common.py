@@ -330,23 +330,28 @@ class Product:
     ean: str | None
     brand_re: re.Pattern | None
     model_re: re.Pattern | None
+    kind: str = "model"          # 'model' | 'series'(系列兜底，只有 ci-media 用)
+    model: str = ""
 
 
-def load_products(active_only: bool = True) -> list[Product]:
-    sql = ("SELECT product_id, brand, display_name, is_own, ean, brand_regex, match_regex "
-           "FROM core.ci_product")
+def load_products(active_only: bool = True, kinds: tuple[str, ...] = ("model",)) -> list[Product]:
+    """默认只返回具体型号。系列兜底行(kind='series')只有 ci-media 显式要 ——
+    价格/社媒/广告层拿系列名去搜只会搜回噪音，且系列行的 match_regex 是品类词不是型号。"""
+    sql = ("SELECT product_id, brand, display_name, is_own, ean, brand_regex, match_regex, "
+           "       kind, model FROM core.ci_product WHERE kind = ANY(%s)")
     if active_only:
-        sql += " WHERE active"
+        sql += " AND active"
     sql += " ORDER BY product_id"
     out: list[Product] = []
     with _pg() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql)
-            for pid, brand, disp, own, ean, brx, mrx in cur.fetchall():
+            cur.execute(sql, (list(kinds),))
+            for pid, brand, disp, own, ean, brx, mrx, kind, model in cur.fetchall():
                 out.append(Product(
                     pid, brand, disp, own, ean,
                     re.compile(brx, re.IGNORECASE) if brx else None,
                     re.compile(mrx, re.IGNORECASE) if mrx else None,
+                    kind, model,
                 ))
     return out
 

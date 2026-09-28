@@ -39,7 +39,7 @@ fi
 
 # --- 1) 产品主数据 -----------------------------------------------------------
 "${PSQL[@]}" -c "TRUNCATE core.ci_product_stage;"
-"${PSQL[@]}" -c "\copy core.ci_product_stage(product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes) FROM STDIN WITH (FORMAT csv, HEADER true)" < "$CSV_PROD"
+"${PSQL[@]}" -c "\copy core.ci_product_stage(product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes,kind) FROM STDIN WITH (FORMAT csv, HEADER true)" < "$CSV_PROD"
 echo "--- 产品同步(removed / upserted / total)---"
 "${PSQL[@]}" -c "SELECT * FROM core.sync_ci_product();"
 
@@ -51,13 +51,13 @@ echo "--- alias 同步(removed / upserted / total)---"
 
 # --- 3) 缺口清单:哪些「产品 × 关键源」还没填标识 ------------------------------
 # 只列**靠稳定 id 直接取数**的源。eBay 与 mydealz 走关键词搜索(结果再逐条复核型号)，
-# 不需要 alias，列进来只会制造永远清不掉的假缺口。
+# 不需要 alias，列进来只会制造永远清不掉的假缺口。系列兜底行(kind='series')只给媒体层用，同理不列。
 echo "--- 待补的标识(product × source)---"
 "${PSQL[@]}" -tAF' ' -c "
   SELECT p.product_id, s.source_code
   FROM core.ci_product p
   CROSS JOIN (VALUES ('amazon_de'),('idealo'),('geizhals')) AS s(source_code)
-  WHERE p.active
+  WHERE p.active AND p.kind = 'model'
     AND NOT EXISTS (SELECT 1 FROM core.ci_product_alias a
                     WHERE a.product_id = p.product_id AND a.source_code = s.source_code)
   ORDER BY 1, 2;"
@@ -65,7 +65,7 @@ echo "--- 待补的标识(product × source)---"
 MISSING=$("${PSQL[@]}" -tAc "
   SELECT count(*) FROM core.ci_product p
   CROSS JOIN (VALUES ('amazon_de'),('idealo'),('geizhals')) AS s(source_code)
-  WHERE p.active
+  WHERE p.active AND p.kind = 'model'
     AND NOT EXISTS (SELECT 1 FROM core.ci_product_alias a
                     WHERE a.product_id = p.product_id AND a.source_code = s.source_code);")
 if [[ "$MISSING" -gt 0 ]]; then

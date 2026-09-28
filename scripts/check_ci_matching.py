@@ -38,6 +38,7 @@ from ci_price import (
     parse_jsonld_product,
     parse_mydealz_rss,
 )
+from ci_media import series_hits, series_queries
 
 REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 
@@ -66,17 +67,23 @@ def load_seed_products():
                 ean=(r["ean"].strip() or None),
                 brand_re=re.compile(r["brand_regex"], re.IGNORECASE) if r["brand_regex"].strip() else None,
                 model_re=re.compile(r["match_regex"], re.IGNORECASE) if r["match_regex"].strip() else None,
+                kind=(r.get("kind") or "model").strip() or "model",
+                model=r["model"].strip(),
             ))
     return out
 
 
-PRODUCTS = load_seed_products()
+ALL_ROWS = load_seed_products()
+PRODUCTS = [p for p in ALL_ROWS if p.kind == "model"]     # 与 load_products() 默认一致
+SERIES = [p for p in ALL_ROWS if p.kind == "series"]
 
 # ---------------------------------------------------------------------------
 print("1) seed CSV 完整性")
 check(len(PRODUCTS) == 5, f"5 款产品(读到 {len(PRODUCTS)})")
 check(sum(1 for p in PRODUCTS if p.is_own) == 1, "恰好一款 is_own")
 check(all(p.brand_re and p.model_re for p in PRODUCTS), "每款都有 brand_regex 与 match_regex")
+check(all(p.kind in ("model", "series") for p in ALL_ROWS), "kind 只取 model / series")
+check([s.product_id for s in SERIES] == ["ecovacs-winbot"], f"系列兜底行(读到 {[s.product_id for s in SERIES]})")
 
 # ---------------------------------------------------------------------------
 print("2) 单品语境(商品页/报价)：正确命中")
@@ -249,6 +256,47 @@ check(looks_like_bot_wall(fx("amazon_botwall.html"), 200), "验证码页在 200 
 check(looks_like_bot_wall("", 503), "503 判为反爬墙")
 check(looks_like_bot_wall("", 429), "429 判为反爬墙")
 check(not looks_like_bot_wall(fx("amazon_dp.html"), 200), "正常商品页不误判")
+
+# ---------------------------------------------------------------------------
+print("11) 媒体层系列兜底(ECOVACS WINBOT)：横评标题不写型号也不能漏")
+# 标题取自 2026-09-28 Google News「ECOVACS WINBOT」真实检索结果
+check(series_queries(SERIES) == [("ecovacs-winbot", "ECOVACS WINBOT"),
+                                 ("ecovacs-winbot", "ECOVACS WINBOT when:14d")],
+      "系列检索词 = 品牌 + 系列名，外加近期窗口")
+
+
+def media(title, found_by=()):
+    pids = match_products_all(title, PRODUCTS)
+    return pids, series_hits(title, None, list(found_by), pids, PRODUCTS, SERIES)
+
+
+BY_SERIES = ("ecovacs-winbot",)
+for title, found_by, want_models, want_series, label in [
+    ("Die Sonne zeigt jeden Fleck: Diese Fensterputzroboter helfen - BILD", BY_SERIES,
+     [], ["ecovacs-winbot"], "系列检索搜回的品类横评 → 系列"),
+    ("Fensterputzroboter im Test: So werden Scheiben wirklich sauber - IMTEST", BY_SERIES,
+     [], ["ecovacs-winbot"], "系列检索搜回的品类评测 → 系列"),
+    ("Fensterputzroboter im Test - welches Gerät hat den Durchblick? - n-tv.de", ("hutt-10",),
+     [], [], "只由 HUTT 检索搜回、标题无 ECOVACS → 不挂 ECOVACS 系列"),
+    ("Tink haut Deal raus: Ecovacs Fensterroboter für unter 220 Euro - n-tv.de", (),
+     [], ["ecovacs-winbot"], "标题有品牌+品类词，与检索来源无关 → 系列"),
+    ("Ecovacs Winbot W2 Omni im Test: Smarter Fensterputzer zum Mitnehmen - IMTEST", BY_SERIES,
+     [], ["ecovacs-winbot"], "未跟踪的 W2 OMNI 不得挂 W2 PRO，落系列"),
+    ("Top 10: Der beste Fensterputzroboter im Test – Hutt ist Testsieger vor Ecovacs - heise online",
+     BY_SERIES, ["hutt-10"], ["ecovacs-winbot"], "命中别家型号不影响 ECOVACS 系列兜底"),
+    ("Ecovacs Winbot W2S Pro Omni im Test: Fensterputzen wie die Profis - WinFuture", BY_SERIES,
+     ["ecovacs-w2s-omni"], [], "已命中 ECOVACS 型号 → 不再重复挂系列"),
+    ("ECOVACS: Neues Mähroboter-Line-up startet in Deutschland - SmarthomeAssistent", BY_SERIES,
+     [], [], "同品牌割草机新闻无品类词 → 不收"),
+    ("Ecovacs-Saugroboter zum Schleuderpreis bei Netto – bis zu 61 % sparen - Merkur", BY_SERIES,
+     [], [], "同品牌扫地机新闻 → 不收"),
+    ("God of War Laufey: Vorbestellungen starten am 29. September - Caschys Blog", BY_SERIES,
+     [], [], "近期窗口搜回的无关新闻 → 不收"),
+    ("Ecovacs Winbot Ersatztücher Fensterputzroboter 12er Set", BY_SERIES,
+     [], [], "配件 → 不收"),
+]:
+    got = media(title, found_by)
+    check(got == (want_models, want_series), label, f"得到 {got}")
 
 # ---------------------------------------------------------------------------
 print()

@@ -16,6 +16,15 @@ FAZ Kaufkompass/Stiftung Warentest 各自的 feed 路径会改，猜错的后果
   · 只有链接指向出版方真实域名时(即 CI_MEDIA_EXTRA_FEEDS 直连的 feed)才去取
     全文，用 trafilatura 去模板抽正文(德语表现好)。
 这样媒体覆盖当天就有数据，全文是锦上添花而非前置条件。
+
+系列兜底(core.ci_product.kind='series'，如 ECOVACS WINBOT)：
+  横评/品类稿的标题常常只写「Fensterputzroboter im Test」不写型号，按型号正则
+  必然漏。系列行额外按「品牌 + 系列名」检索一次(外加 when:14d 近期窗口 —— 单次
+  检索只回 100 条，按相关度排，新稿容易被一年内的老稿挤掉)，文章没命中该品牌
+  任何型号时，满足其一即挂到系列行：
+    · 标题/摘要里有品牌 且 有品类词(系列行的 match_regex)；
+    · 由本系列检索发现(Google 在正文里命中了系列名) 且 标题有品类词。
+  品类词这道闸挡的是同品牌的非擦窗新闻(Deebot / GOAT / 泳池机)。
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from ci_common import (
     _env,
     _pg,
     fetch,
+    is_accessory,
     is_dry_run,
     load_products,
     looks_like_bot_wall,
@@ -43,6 +53,7 @@ from prefect import flow, get_run_logger, task
 from prefect.runtime import flow_run
 
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
+SERIES_RECENT_WINDOW = "when:14d"   # 周频采集 + 一周余量
 
 
 def _media_domains() -> dict[str, str]:
@@ -109,6 +120,41 @@ def parse_rss(xml_bytes: bytes) -> list[dict]:
     return items
 
 
+def _gnews(q: str) -> dict:
+    return {"q": q, "hl": "de", "gl": "DE", "ceid": "DE:de"}
+
+
+def series_queries(series) -> list[tuple[str, str]]:
+    """系列行 → [(product_id, 检索词)]:全量一次 + 近期窗口一次。"""
+    out = []
+    for s in series:
+        q = f"{s.brand} {s.model}".strip()
+        out += [(s.product_id, q), (s.product_id, f"{q} {SERIES_RECENT_WINDOW}")]
+    return out
+
+
+def series_hits(title: str, summary: str | None, found_by, model_pids, models, series) -> list[str]:
+    """型号没命中时的系列兜底 → 命中的系列 product_id。规则见文件头。
+
+    按品牌判「没命中」：一篇「Hutt ist Testsieger vor Ecovacs」挂上了 hutt-10，
+    ECOVACS 这边一款都没点名，仍应算进 ECOVACS 系列。
+    """
+    text = f"{title}\n{summary or ''}"
+    if is_accessory(text.lower()):
+        return []
+    brand_of = {p.product_id: p.brand for p in models}
+    hit_brands = {brand_of.get(pid) for pid in model_pids}
+    out = []
+    for s in series:
+        if s.brand in hit_brands or not s.model_re:
+            continue
+        if s.brand_re and s.brand_re.search(text) and s.model_re.search(text):
+            out.append(s.product_id)
+        elif s.product_id in (found_by or ()) and s.model_re.search(title or ""):
+            out.append(s.product_id)
+    return out
+
+
 def extract_article(html: str) -> str | None:
     """trafilatura 去模板抽正文;失败返回 None 由调用方退回 RSS 摘要。"""
     try:
@@ -140,18 +186,23 @@ def _write_mentions(rows) -> int:
 
 @task(retries=2, retry_delay_seconds=30)
 def discover(run_id: str) -> list[dict]:
-    """Google News RSS + 可选直连 feed → 候选文章清单(已按标题粗筛)。"""
+    """Google News RSS(每款型号 + 每个系列) + 可选直连 feed → 候选文章清单。
+
+    每条带 found_by = 发现它的检索所属 product_id 列表(直连 feed 为空)，
+    系列兜底要靠它判断「是不是系列检索搜回来的」。
+    """
     logger = get_run_logger()
     products = load_products()
-    seen, out = set(), []
+    series = load_products(kinds=("series",))
+    seen: dict[str, dict] = {}
+    out = []
 
-    feeds = [(GOOGLE_NEWS_RSS,
-              {"q": p.display_name, "hl": "de", "gl": "DE", "ceid": "DE:de"})
-             for p in products]
+    feeds = [(GOOGLE_NEWS_RSS, _gnews(p.display_name), p.product_id) for p in products]
+    feeds += [(GOOGLE_NEWS_RSS, _gnews(q), pid) for pid, q in series_queries(series)]
     for extra in filter(None, (_env("CI_MEDIA_EXTRA_FEEDS") or "").split(",")):
-        feeds.append((extra.strip(), None))
+        feeds.append((extra.strip(), None, None))
 
-    for url, params in feeds:
+    for url, params, pid in feeds:
         try:
             status, body, _ctype = fetch(url, mode="api", params=params)
         except FetchBlocked as e:
@@ -161,12 +212,16 @@ def discover(run_id: str) -> list[dict]:
             logger.warning("feed HTTP %s: %s", status, url)
             continue
         items = parse_rss(body)
-        logger.info("%s → %d 条", urlparse(url).netloc, len(items))
+        logger.info("%s [%s] → %d 条", urlparse(url).netloc,
+                    (params or {}).get("q", "feed"), len(items))
         for it in items:
-            if it["link"] in seen:
-                continue
-            seen.add(it["link"])
-            out.append(it)
+            prev = seen.get(it["link"])
+            if prev is None:
+                it["found_by"] = []
+                seen[it["link"]] = prev = it
+                out.append(it)
+            if pid and pid not in prev["found_by"]:
+                prev["found_by"].append(pid)
     return out
 
 
@@ -174,8 +229,10 @@ def discover(run_id: str) -> list[dict]:
 def fetch_articles(candidates: list[dict], run_id: str) -> dict:
     logger = get_run_logger()
     stats = {"candidates": len(candidates), "matched": 0, "fulltext": 0,
-             "summary_only": 0, "mentions": 0, "blocked": 0, "policy_skip": 0}
+             "summary_only": 0, "mentions": 0, "blocked": 0, "policy_skip": 0,
+             "series_fallback": 0}
     products = load_products()
+    series = load_products(kinds=("series",))
     domains = _media_domains()
     rows = []
 
@@ -183,9 +240,12 @@ def fetch_articles(candidates: list[dict], run_id: str) -> dict:
         # 标题+摘要即可判定归属，不必为此先抓一次全文
         pre = f"{it['title']}\n{it.get('summary') or ''}"
         pids = match_products_all(pre, products)
-        if not pids:
+        spids = series_hits(it["title"], it.get("summary"), it.get("found_by"),
+                            pids, products, series)
+        if not pids and not spids:
             continue
         stats["matched"] += 1
+        stats["series_fallback"] += bool(spids)
 
         outlet = _outlet_for(it["link"], it.get("source_url", ""), domains)
         text, snap = it.get("summary"), None
@@ -214,10 +274,11 @@ def fetch_articles(candidates: list[dict], run_id: str) -> dict:
                 logger.info("按策略跳过全文 %s: %s", it["link"], e)
 
         # 覆盖记录不依赖全文是否取到
-        for pid in pids:
+        for pid in pids + spids:
             rows.append((pid, outlet, it["link"], it["link"], it["title"][:1000],
                          text, "de", None, _pub(it.get("published")),
                          json.dumps({"discovered_via": "rss",
+                                     "matched_by": "series" if pid in spids else "model",
                                      "has_fulltext": bool(text and text != it.get("summary"))}),
                          snap, run_id))
     stats["mentions"] = _write_mentions(rows)
