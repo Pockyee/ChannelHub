@@ -1,7 +1,15 @@
-product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes,kind
-hutt-10,HUTT,HUTT 10,HUTT 10,,true,true,\bhutt\b,\b(?:w\s*)?10\b,自家产品。市面写法有 Hutt 10 / HUTT Fensterputzroboter 10 / 偶见 W10;HUTT 另有 W8 等型号故必须带 10 的词边界。配件(Ersatztücher 等)由代码侧配件词黑名单排除,model
-ecovacs-w3-omni,ECOVACS,WINBOT W3 OMNI,ECOVACS WINBOT W3 OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw3\b,,model
-ecovacs-w2s-omni,ECOVACS,WINBOT W2S OMNI,ECOVACS WINBOT W2S OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw2s\b,,model
-ecovacs-w2-pro-omni,ECOVACS,WINBOT W2 PRO OMNI,ECOVACS WINBOT W2 PRO OMNI,,false,true,\b(?:ecovacs|winbot)\b,"\bw2\b[^a-z0-9]{0,4}pro\b",不得命中 W2 OMNI(另一款，不在跟踪范围)与 W2S OMNI,model
-ecovacs-winbot-mini,ECOVACS,WINBOT MINI,ECOVACS WINBOT MINI,,false,true,\b(?:ecovacs|winbot)\b,\bmini\b,型号 token 是 mini（不带 W 编号）；品牌闸门保证不会命中别家的 mini 产品,model
-ecovacs-winbot,ECOVACS,WINBOT,ECOVACS WINBOT (series),,false,true,\b(?:ecovacs|winbot)\b,"\bwinbot\b|fenster[\w-]{0,14}roboter|fensterputz|fensterreinig|window[- ]?(?:clean|robot)",系列兜底，只有 ci-media 用(按 brand+model 即「ECOVACS WINBOT」检索 Google News)。文章没命中任何 ECOVACS 型号时挂到这里：标题/摘要里有品牌且有品类词，或经本系列检索发现且标题有品类词。match_regex 是品类词不是型号 token —— 挡掉 Deebot/GOAT/泳池机等同品牌非擦窗新闻,series
+product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes,kind,line
+hutt-10,HUTT,HUTT 10,HUTT 10,,true,true,\bhutt\b,\b(?:w\s*)?10\b,自家产品。市面写法有 Hutt 10 / HUTT Fensterputzroboter 10 / 偶见 W10;HUTT 另有 W8 等型号故必须带 10 的词边界。配件(Ersatztücher 等)由代码侧配件词黑名单排除,model,hutt
+ecovacs-w3-omni,ECOVACS,WINBOT W3 OMNI,ECOVACS WINBOT W3 OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw3\b,,model,hutt
+ecovacs-w2s-omni,ECOVACS,WINBOT W2S OMNI,ECOVACS WINBOT W2S OMNI,,false,true,\b(?:ecovacs|winbot)\b,\bw2s\b,,model,hutt
+ecovacs-w2-pro-omni,ECOVACS,WINBOT W2 PRO OMNI,ECOVACS WINBOT W2 PRO OMNI,,false,true,\b(?:ecovacs|winbot)\b,"\bw2\b[^a-z0-9]{0,4}pro\b",不得命中 W2 OMNI(另一款，不在跟踪范围)与 W2S OMNI,model,hutt
+ecovacs-winbot-mini,ECOVACS,WINBOT MINI,ECOVACS WINBOT MINI,,false,true,\b(?:ecovacs|winbot)\b,"\bwinbot[^a-z0-9]{0,4}mini\b(?![^a-z0-9]{0,2}2\b)","一代 MINI。mini 必须紧跟 winbot —— 光有品牌闸门挡不住同一标题里别的 mini(如「Mini-LED TV … Ecovacs Deebot」);后面紧跟 2 的是 MINI 2,由负向断言排除",model,hutt
+ecovacs-winbot-mini-2,ECOVACS,WINBOT MINI 2,ECOVACS WINBOT MINI 2,,false,true,\b(?:ecovacs|winbot)\b,"\bwinbot[^a-z0-9]{0,4}mini[^a-z0-9]{0,2}2\b",二代 MINI:价格 + 提及。写法 Winbot Mini 2 / Mini-2 / Mini2;与一代 MINI 的正则互斥,model,hutt
+ecovacs-winbot,ECOVACS,WINBOT,ECOVACS WINBOT (series),,false,true,\b(?:ecovacs|winbot)\b,"\bwinbot\b|fenster[\w-]{0,14}roboter|fensterputz|fensterreinig|window[- ]?(?:clean|robot)",系列兜底，只有 ci-media 用(按 brand+model 即「ECOVACS WINBOT」检索 Google News)。文章没命中任何 ECOVACS 型号时挂到这里：标题/摘要里有品牌且有品类词，或经本系列检索发现且标题有品类词。match_regex 是品类词不是型号 token —— 挡掉 Deebot/GOAT/泳池机等同品牌非擦窗新闻,series,hutt
+imoo-z1,imoo,Watch Phone Z1,imoo Z1,,true,true,\bimoo\b,\bz\s*-?1\b,自家产品(imoo 线)。市面写法 imoo Watch Phone Z1 / imoo Z1;imoo 另有 Z2/Z5/Z6/Z10 等型号，型号 token 必须带词边界,model,imoo
+imoo-z3,imoo,Watch Phone Z3,imoo Z3,,true,true,\bimoo\b,\bz\s*-?3\b,自家产品(imoo 线),model,imoo
+imoo-z7,imoo,Watch Phone Z7,imoo Z7,,true,true,\bimoo\b,\bz\s*-?7\b,自家产品(imoo 线),model,imoo
+imoo-x10,imoo,Watch Phone X10,imoo X10,,true,true,\bimoo\b,\bx\s*-?10\b,自家产品(imoo 线),model,imoo
+xplora-xgo3,Xplora,XGO3,Xplora XGO3,,false,true,\bxplora\b,\bx\s*-?go\s*-?3\b,竞品(imoo 线)。写法 XGO3 / X GO 3 / XGO 3;不得命中 XGO2,model,imoo
+xplora-x6play,Xplora,X6Play,Xplora X6Play,,false,true,\bxplora\b,\bx\s*-?6\s*-?play\b,竞品(imoo 线)。写法 X6Play / X6 Play;不得命中 X5 Play,model,imoo
+tcl-mt48,TCL,Movetime Kids' Watch MT48,TCL MT48,,false,true,\btcl\b,\bmt\s*-?48x?\b,"竞品(imoo 线)。写法 TCL Movetime MT48 / MT48X(运营商 eSIM 版，同一款表，一并计入)。TCL 是综合品牌(电视/手机)，只做价格与提及对比，广告层已在 ci_ad_advertiser.csv 用 * 禁用",model,imoo

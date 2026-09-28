@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS mart.ci_digest (
     digest_id     bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     digest_on     date NOT NULL,          -- 本期截止日（生成日）
     window_days   integer NOT NULL,       -- 回看天数，与 CI_DIGEST_WINDOW_DAYS 对应
-    scope         text NOT NULL,          -- 'all' 或某个 core.ci_product.product_id
+    scope         text NOT NULL,          -- 情报线 core.ci_product.line(hutt/imoo);2026-09 前的旧行为 'all'
     mention_cnt   integer NOT NULL,       -- 本期喂进去多少条，0 条时不调 LLM
     source_codes  text[],                 -- 本期覆盖到哪些源，判断摘要代表性用
     summary       text NOT NULL,
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS mart.ci_digest (
 COMMENT ON TABLE mart.ci_digest IS
   'LLM 生成的竞品情报摘要;mart 层唯一实体表(摘要 SQL 算不出来，必须落盘)。同期重跑覆盖';
 COMMENT ON COLUMN mart.ci_digest.scope IS
-  '''all'' = 全品类总览;其余取值为 core.ci_product.product_id，一款一份';
+  '情报线代码(core.ci_product.line，如 hutt / imoo)，一条线一份;2026-09 分线之前的旧记录为 ''all''';
 COMMENT ON COLUMN mart.ci_digest.mention_cnt IS
   '本期送进 LLM 的提及条数;为 0 时不调用 LLM，也就不会有该期记录 —— 看板上的空档说明那周确实没声量';
 COMMENT ON COLUMN mart.ci_digest.input_tokens IS

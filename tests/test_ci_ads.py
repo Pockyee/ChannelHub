@@ -174,6 +174,124 @@ def test_write_ads_dry_run_dedupes():
     assert ci_ads._write_ads([row, dict(row)]) == 1
 
 
+# ---------------------------------------------------------------------------
+# 按落地页域名归属（021）
+# ---------------------------------------------------------------------------
+class _Log:
+    def info(self, *a): pass
+    def warning(self, *a): pass
+
+
+def _tc_item(adv, cid):
+    return {"1": adv, "2": cid, "3": {"1": {"4": "https://…"}}, "12": "BlueVision Interactive Limited"}
+
+
+def test_tc_request_region_code_and_token():
+    req = ci_ads.tc_request("imoostore.com", "DE")
+    assert req["3"] == {"8": [2276], "12": {"1": "imoostore.com", "2": True}}
+    assert req["7"]["3"] == 2276 and "4" not in req
+    assert ci_ads.tc_request("imoo.me", "FR", "tok")["4"] == "tok"
+    try:
+        ci_ads.tc_request("imoo.me", "US")
+        assert False, "非 EEA 地区应拒绝"
+    except ci_ads.DomainLookupFailed:
+        pass
+
+
+def test_parse_tc_page_ok_and_changed_shape():
+    items, token, total = ci_ads.parse_tc_page(
+        {"1": [_tc_item("AR1", "CR1"), _tc_item("AR1", "CR2")], "2": "next", "4": "93", "5": "x"})
+    assert items == {"CR1": "AR1", "CR2": "AR1"} and token == "next" and total == 93
+    assert ci_ads.parse_tc_page({"4": "0"}) == ({}, None, 0)             # 域名没有广告
+    for bad in ([], {"1": "oops"}, {"1": [{"1": 123, "2": "CR1"}]}):
+        try:
+            ci_ads.parse_tc_page(bad)
+            assert False, f"结构变了应抛: {bad}"
+        except ci_ads.DomainLookupFailed:
+            pass
+
+
+def test_tc_domain_creatives_paginates_and_checks_total():
+    ci_ads.TC_PAGE_PAUSE = 0
+    pages = {None: {"1": [_tc_item("AR1", "CR1"), _tc_item("AR1", "CR2")], "2": "p2", "4": "3"},
+             "p2": {"1": [_tc_item("AR2", "CR3")], "4": "3"}}
+    seen = []
+
+    def post(req):
+        seen.append(req.get("4"))
+        return pages[req.get("4")]
+    got = ci_ads.tc_domain_creatives("imoostore.com", "DE", post=post)
+    assert got == {"CR1": "AR1", "CR2": "AR1", "CR3": "AR2"} and seen == [None, "p2"]
+    # 报告 5 条只取到 3 条 → 不完整，按失败处理
+    pages["p2"]["4"] = "5"
+    try:
+        ci_ads.tc_domain_creatives("imoostore.com", "DE", post=post)
+        assert False, "条数对不上应抛"
+    except ci_ads.DomainLookupFailed:
+        pass
+    # 改版后照样 200 但字段全没了 → 失败，不是「0 条广告」
+    try:
+        ci_ads.tc_domain_creatives("imoostore.com", "DE", post=lambda req: {"9": "new"})
+        assert False, "空响应应抛"
+    except ci_ads.DomainLookupFailed:
+        pass
+    # 明确报告 0 条 → 确实没有广告
+    assert ci_ads.tc_domain_creatives("imoostore.com", "DE", post=lambda req: {"4": "0"}) == {}
+
+
+def test_resolve_domain_creatives_zero_with_known_is_failure():
+    use, prunable, failures = ci_ads.resolve_domain_creatives(
+        {"imoo": ["imoostore.com"]}, "DE", _Log(),
+        lookup=lambda d, r: {}, known=lambda src, brand: {"CR_OLD"})
+    # 原本有 93 条、突然 0 条 → 疑似改版：沿用旧清单、不删、要告警
+    assert use["imoo"] == {"CR_OLD"} and "imoo" not in prunable and len(failures) == 1
+    # 库里本来就没有 → 真的是 0 条，照常
+    use, prunable, failures = ci_ads.resolve_domain_creatives(
+        {"imoo": ["imoostore.com"]}, "DE", _Log(),
+        lookup=lambda d, r: {}, known=lambda src, brand: set())
+    assert use["imoo"] == set() and prunable["imoo"] == set() and not failures
+
+
+def test_resolve_domain_creatives_falls_back_without_pruning():
+    def lookup(domain, region):
+        if domain == "imoo.me":
+            raise ci_ads.DomainLookupFailed("HTTP 500")
+        return {"CR_NEW": "AR_BV"}
+    known = lambda src, brand: {"CR_OLD"}                                  # noqa: E731
+    use, prunable, failures = ci_ads.resolve_domain_creatives(
+        {"imoo": ["imoo.me", "imoostore.com"], "Xplora": ["xplora.de"]}, "DE", _Log(),
+        lookup=lookup, known=known)
+    # imoo 有一个域名失败：沿用已知 ∪ 本轮成功的，但不能据此删行
+    assert use["imoo"] == {"CR_OLD", "CR_NEW"} and "imoo" not in prunable
+    assert use["Xplora"] == {"CR_NEW"} and prunable["Xplora"] == {"CR_NEW"}
+    assert len(failures) == 1 and failures[0].startswith("imoo / imoo.me")
+
+
+def test_google_brand_specs_domain_replaces_name_search():
+    products = PRODUCTS + [Product("imoo-z7", "imoo", "imoo Z7", True, None,
+                                   re.compile(r"\bimoo\b", re.I), None)]
+    brands = ci_ads.brand_targets(products)
+    allow = {("google_ads", "ECOVACS"): ["AR_ECO"]}
+    specs = ci_ads.google_brand_specs(brands, allow, {}, {"imoo": {"CR1", "CR2"}, "ECOVACS": {"CR9"}})
+    assert ("imoo", "creatives", {"CR1", "CR2"}) in specs
+    assert not any(s[0] == "imoo" and s[1] == "regex" for s in specs)    # 不再按名检索
+    # 白名单账户与域名素材并用
+    assert ("ECOVACS", "ids", ["AR_ECO"]) in specs and ("ECOVACS", "creatives", {"CR9"}) in specs
+    assert ("HUTT", "regex", r"\bhutt\b", set()) in specs                 # 其它品牌不受影响
+    # 登记了域名但一条素材都没有 → 什么都不查（也不回退到按名检索）
+    specs = ci_ads.google_brand_specs(brands, {}, {}, {"imoo": set()})
+    assert not any(s[0] == "imoo" for s in specs)
+
+
+def test_build_google_sql_creatives():
+    schema = _schema()
+    cols = ci_ads.resolve_columns(schema)
+    sql, params = ci_ads.build_google_sql(cols, schema, [("imoo", "creatives", {"CR2", "CR1"})])
+    assert "c.creative_id IN UNNEST(@cr_0)" in sql
+    cr = next(p for p in params if p["name"] == "cr_0")
+    assert [v["value"] for v in cr["parameterValue"]["arrayValues"]] == ["CR1", "CR2"]
+
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     failed = 0

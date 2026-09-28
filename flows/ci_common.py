@@ -318,6 +318,10 @@ ACCESSORY_TOKENS = (
     "reinigungsmittel", "reiniger", "halterung", "netzteil", "kabel", "fernbedienung",
     "sicherheitsseil", "filter", "bürste", "buerste", "set aus", "nachfüll", "nachfuell",
     "spare", "replacement", "accessor",
+    # 儿童手表(imoo 线)的配件：表带/贴膜/保护壳/充电器。带「für」是故意的 —— 整机标题
+    # 也会写「mit Armband」「Silikon-Armband」，只有「Armband für imoo Z7」才是配件。
+    "armband für", "armbänder für", "schutzfolie", "displayschutz", "panzerglas",
+    "hülle für", "huelle für", "ladegerät für", "ladegeraet für", "ladeclip",
 )
 
 

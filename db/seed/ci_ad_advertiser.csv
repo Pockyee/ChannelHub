@@ -2,3 +2,6 @@ source_code,advertiser_id,brand,advertiser_name,active,notes
 google_ads,AR06907559008387727361,ECOVACS,ECOVACS EUROPE GMBH,true,2026-09-28 discover 确认:官方欧洲主体
 google_ads,AR04559643642003718145,ECOVACS,ECOVACS EUROPE GMBH,true,2026-09-28 discover 确认:官方欧洲主体(第二个账户)
 google_ads,*,HUTT,,false,按名检索全是同名公司(画廊/牙科/T恤店等 14 个);确认官方广告主 id 后以 active=true 登记并删掉本行。候选:HUTT Ltd AR16809284089847742465 待确认
+google_ads,AR13715274853370560513,Xplora,Xplora Technologies Denmark ApS,false,"2026-09-28 用户决定:丹麦公司量很小(8 条素材,≤8,000 次展示),不计入统计"
+google_ads,*,TCL,,false,"2026-09-28 用户决定:TCL 是综合品牌(电视/手机等),广告量不代表儿童手表,不看广告"
+meta_ads,*,TCL,,false,"2026-09-28 用户决定:TCL 是综合品牌(电视/手机等),广告量不代表儿童手表,不看广告"

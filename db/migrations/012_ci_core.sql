@@ -5,6 +5,8 @@
 --       情报采集(价格 / 零售口碑 / 用户讨论 / 媒体评测)，最终在 Superset 出
 --       品类 Market Intelligence 看板，并与自家真实需求(mart.v_hutt_shop_orders)
 --       对照。命名沿用 raw/core/mart 分层 + 域前缀 ci_。
+--       2026-09 起分「情报线」(core.ci_product.line)：hutt = HUTT vs ECOVACS 擦窗机，
+--       imoo = imoo vs Xplora 儿童手表。采集路径共用，看板按线各出一个。
 --
 -- 产出：
 --   · core.ci_product        产品主数据(自家 + 竞品同表，is_own 区分)，CSV 即权威
@@ -46,12 +48,14 @@ CREATE TABLE IF NOT EXISTS core.ci_product (
     brand_regex  text,                      -- 品牌判定正则(ECOVACS 的机器常只写 WINBOT)
     match_regex  text,                      -- 型号判定正则(带词边界)，见文件头设计要点
     notes        text,
-    kind         text NOT NULL DEFAULT 'model'  -- 'model' 具体型号 | 'series' 系列兜底(只给媒体层用)
+    kind         text NOT NULL DEFAULT 'model', -- 'model' 具体型号 | 'series' 系列兜底(只给媒体层用)
+    line         text NOT NULL DEFAULT 'hutt'   -- 情报线:一条线 = 一组自家 vs 竞品 = 一个看板
 );
 
 -- 已建表的实例前向补列(本迁移每次 deploy 重放，必须两条路径都成立)
 ALTER TABLE core.ci_product ADD COLUMN IF NOT EXISTS brand_regex text;
 ALTER TABLE core.ci_product ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'model';
+ALTER TABLE core.ci_product ADD COLUMN IF NOT EXISTS line text NOT NULL DEFAULT 'hutt';
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -70,13 +74,18 @@ COMMENT ON COLUMN core.ci_product.kind IS
   'model=具体型号(全部采集层都用);series=系列兜底行，只有 ci-media 用：按 display_name 检索 Google News，'
   '文章没命中该品牌任何型号、但属于该系列时挂到这一行。load_products() 默认只返回 model，'
   '价格/社媒/广告层不会拿系列行去搜。系列行的 match_regex 是「品类词」(擦窗机相关)，不是型号 token';
+COMMENT ON COLUMN core.ci_product.line IS
+  '情报线:hutt=HUTT vs ECOVACS 擦窗机 / imoo=imoo vs Xplora 儿童手表。一条线一个看板，'
+  '自家价差只在同一条线内算(v_ci_compare);广告按品牌归线，故一个品牌只能属于一条线';
 
 CREATE TABLE IF NOT EXISTS core.ci_product_stage (
     product_id text, brand text, model text, display_name text,
-    ean text, is_own text, active text, brand_regex text, match_regex text, notes text, kind text
+    ean text, is_own text, active text, brand_regex text, match_regex text, notes text, kind text,
+    line text
 );
 ALTER TABLE core.ci_product_stage ADD COLUMN IF NOT EXISTS brand_regex text;
 ALTER TABLE core.ci_product_stage ADD COLUMN IF NOT EXISTS kind text;
+ALTER TABLE core.ci_product_stage ADD COLUMN IF NOT EXISTS line text;
 COMMENT ON TABLE core.ci_product_stage IS 'CSV 装载暂存(loader 专用，每次 TRUNCATE 后 \copy 灌入;非权威)';
 
 -- ---------------------------------------------------------------------------
@@ -124,7 +133,7 @@ BEGIN
     WITH up AS (
         INSERT INTO core.ci_product
             (product_id, brand, model, display_name, ean, is_own, active,
-             brand_regex, match_regex, notes, kind)
+             brand_regex, match_regex, notes, kind, line)
         SELECT DISTINCT ON (btrim(product_id))
                btrim(product_id), btrim(brand), btrim(model), btrim(display_name),
                nullif(btrim(coalesce(ean,'')), ''),
@@ -133,7 +142,8 @@ BEGIN
                nullif(btrim(coalesce(brand_regex,'')), ''),
                nullif(btrim(coalesce(match_regex,'')), ''),
                nullif(btrim(coalesce(notes,'')), ''),
-               coalesce(nullif(lower(btrim(coalesce(kind,''))), ''), 'model')
+               coalesce(nullif(lower(btrim(coalesce(kind,''))), ''), 'model'),
+               coalesce(nullif(lower(btrim(coalesce(line,''))), ''), 'hutt')
         FROM core.ci_product_stage
         WHERE nullif(btrim(coalesce(product_id,'')), '') IS NOT NULL
           AND nullif(btrim(coalesce(brand,'')), '')      IS NOT NULL
@@ -149,7 +159,8 @@ BEGIN
             brand_regex  = EXCLUDED.brand_regex,
             match_regex  = EXCLUDED.match_regex,
             notes        = EXCLUDED.notes,
-            kind         = EXCLUDED.kind
+            kind         = EXCLUDED.kind,
+            line         = EXCLUDED.line
         RETURNING 1
     ) SELECT count(*) INTO _upserted FROM up;
 

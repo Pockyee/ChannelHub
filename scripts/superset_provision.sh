@@ -47,6 +47,8 @@ IDEMPOTENT_MIGRATIONS=(
   db/migrations/017_ci_mention_detail.sql
   # 广告层:依赖 012 的 core.ci_source / core.ci_product
   db/migrations/019_ci_ads.sql
+  db/migrations/020_ci_ad_daily.sql
+  db/migrations/021_ci_ad_domain.sql
 )
 
 # 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。

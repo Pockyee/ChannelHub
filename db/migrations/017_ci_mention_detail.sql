@@ -23,6 +23,9 @@
 -- ---------------------------------------------------------------------------
 -- mention_kind：分档规则与优先级
 -- ---------------------------------------------------------------------------
+--   social_media  社交媒体平台上的内容 —— 按源判(youtube / instagram)，排最前:
+--                 看板要的是「这条来自社媒」，一条「im Test」视频也归这档
+--                 (2026-09-28 起;YouTube 只收视频，不收评论)
 --   test          实测评测 —— 标题/正文出现 im Test / Testbericht / getestet /
 --                 Praxistest / ausprobiert / hands-on
 --   promo         促销 —— price 层(mydealz 本质就是 deal 站)，或标题含
@@ -31,7 +34,7 @@
 --   discussion    用户讨论 —— social 层 + retail 层(Amazon 评论是用户内容)
 --   other         兜底
 --
--- !! 优先级即 CASE 顺序，test 排第一是故意的 !!
+-- !! 优先级即 CASE 顺序，按源判的 social_media 之后 test 排第一是故意的 !!
 --   一篇「im Test」的评测正文里几乎必然出现价格，若 promo 先判会把大批真评测
 --   吞进促销档。反过来「699 Euro auf den Markt」这类上市消息不含 test 词，
 --   落 media_review，正确。
@@ -80,6 +83,7 @@ SELECT
     s.layer                                               AS source_layer,
     s.display_name                                        AS outlet,
     CASE
+      WHEN m.source_code IN ('youtube', 'instagram') THEN 'social_media'
       WHEN coalesce(m.title,'') || ' ' || coalesce(left(m.body, 300),'')
            ~* '\ytests?\y|\ytestbericht|getestet|praxistest|ausprobiert|\yim check\y|hands.?on'
         THEN 'test'
@@ -107,16 +111,17 @@ SELECT
       replace(replace(replace(replace(
         coalesce(nullif(m.title, ''), m.url, '(no title)'),
         '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), '"', '&quot;') ||
-      '</a>'                                              AS title_link
+      '</a>'                                              AS title_link,
+    p.line
 FROM raw.ci_mention m
 JOIN core.ci_product p     ON p.product_id  = m.product_id
 LEFT JOIN core.ci_source s ON s.source_code = m.source_code;
 
 COMMENT ON VIEW mart.v_ci_mention_detail IS
-  '全部提及明细(不限层) + mention_kind 分档(test/promo/media_review/discussion/other);'
+  '全部提及明细(不限层) + mention_kind 分档(social_media/test/promo/media_review/discussion/other);'
   '看板按 mention_kind 过滤。v_ci_media_coverage 是它的媒体子集，保留不动';
 COMMENT ON COLUMN mart.v_ci_mention_detail.mention_kind IS
-  '分档规则见 017 迁移文件头;优先级 test > promo > 按 layer 归类，正则务必用 \y 不是 \b';
+  '分档规则见 017 迁移文件头;优先级 social_media(按源) > test > promo > 按 layer 归类，正则务必用 \y 不是 \b';
 
 GRANT USAGE  ON SCHEMA mart TO bi_readonly;
 GRANT SELECT ON mart.v_ci_mention_detail TO bi_readonly;

@@ -182,6 +182,7 @@ def parse_jsonld_product(html: str) -> dict:
 _GH_OFFER_ID_RE = re.compile(r'id="offer-index-\d+"')
 _GH_JS_PRICE_RE = re.compile(r"price:\s*'([\d.]+)'")
 _GH_JS_MERCHANT_RE = re.compile(r"merchant:\s*'([^']+)'")
+_GH_JS_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})")
 _GH_DISPLAY_PRICE_RE = re.compile(r'class="gh_price"[^>]*>\s*(?:&euro;|€)?\s*([\d.,]+)')
 _GH_MERCHANT_ATTR_RE = re.compile(r'data-merchant-name="([^"]+)"')
 _GH_TITLE_PRICE_RE = re.compile(r'ab\s*(?:&euro;|€)(?:&#xa0;|\s|&nbsp;)*([\d.,]+)', re.I)
@@ -212,13 +213,15 @@ def parse_geizhals(html: str) -> dict:
         if cents is None:
             continue
         mm2 = _GH_JS_MERCHANT_RE.search(block) or _GH_MERCHANT_ATTR_RE.search(block)
+        # 内联 JS 里的商家名带 JS 转义(imoo\u002donline\u002dde),还原成 imoo-online-de
+        merchant = _GH_JS_ESCAPE_RE.sub(lambda e: chr(int(e.group(1), 16)), mm2.group(1)) if mm2 else None
         head = re.sub(r"\s+", " ", block[:300]).lower()
         out["offers"].append({
             "price_cents": cents,
             "currency": "EUR",
             # offer--available / offer--shortly / … 是该站的到货状态类
             "availability": "InStock" if "offer--available" in head else None,
-            "merchant": mm2.group(1) if mm2 else None,
+            "merchant": merchant,
         })
 
     # 兜底：报价块一条都没解析出来时，至少从标题的「ab € 249,90」拿到最低价，
@@ -422,7 +425,22 @@ def collect_page_source(source_code: str, run_id: str) -> dict:
 # 尤其 /rss/gruppe/ecovacs 是**品牌分组**，天然只出竞品的帖子。
 # robots.txt 对 User-agent:* 允许 /rss/ 与 /deals/(该站另行单独禁止了一批 AI 训练
 # 爬虫;我们不是那类 —— 用途是比价监控，不是建训练语料)。
-MYDEALZ_DEFAULT_GROUPS = ("ecovacs", "saugroboter", "haushaltsgeraete")
+# 前三个给 hutt 线(擦窗机)，后三个给 imoo 线(儿童手表)：smartwatch 分组以 Apple/Garmin
+# 为主，kinder(Baby & Kind)兜住归到母婴类的儿童手表帖;儿童手表常与运营商合约捆绑出售,
+# 这类帖子常只挂在 handyvertraege 而不在 smartwatch。三边都靠品牌+型号正则过滤。
+MYDEALZ_DEFAULT_GROUPS = ("ecovacs", "saugroboter", "haushaltsgeraete",
+                          "smartwatch", "kinder", "handyvertraege")
+
+# 合约捆绑帖(「Xplora X6 Play + Vodafone Smart Tech M für 1,61 €/Monat」):帖子上的 price
+# 是一次性加价/合约总价，不是手表售价 —— 进 raw.ci_offer 会把价格曲线拉到离谱的低点。
+# 这类帖只作为提及入库(ci-social),不产生报价。
+_CONTRACT_RE = re.compile(
+    r"/\s*monat|\bmtl\.|monatlich|tarif|vertrag|allnet|grundgeb|zuzahlung|laufzeit",
+    re.IGNORECASE)
+
+
+def is_contract_deal(title: str) -> bool:
+    return bool(_CONTRACT_RE.search(title or ""))
 
 
 def mydealz_groups() -> list[str]:
@@ -465,11 +483,50 @@ def parse_mydealz_rss(xml_bytes: bytes) -> list[dict]:
     return out
 
 
+# 分组网页 /gruppe/<slug>?page=N —— 只给一次性补抓(ci_social.ci_mydealz_backfill)用。
+# RSS 只有最新 30 条;网页按热度排序、能往回翻几个月，但页数有上限(页内 pagination.lastPage,
+# 越界返回 410)。每张帖子卡片是一个 data-vue3='{"name":"ThreadMainListItemNormalizer",…}'
+# 挂载点，属性单引号包裹、内部 JSON 做了 HTML 转义。
+_MYDEALZ_VUE_RE = re.compile(r"data-vue3='([^']*)'")
+_MYDEALZ_LAST_PAGE_RE = re.compile(r'"lastPage":(\d+)')
+
+
+def parse_mydealz_listing(page_html: str) -> tuple[list[dict], int]:
+    """分组网页 → ([{title, link, guid, published, merchant, price_cents, thread}], lastPage)
+
+    item 字段与 parse_mydealz_rss 对齐;link 按 RSS 的格式拼成 /deals/<titleSlug>-<threadId>,
+    与 RSS 采到的同一帖撞同一个 external_id,补抓不会产生重复提及。只收 type=Deal
+    (讨论帖/优惠券的 URL 前缀不同，也不在 RSS 分组 feed 里)。
+    """
+    import html as _html        # 模块级名 html 在本文件里到处被当局部变量用，这里起别名
+    items = []
+    for m in _MYDEALZ_VUE_RE.finditer(page_html):
+        raw = m.group(1)
+        if "ThreadMainListItemNormalizer" not in raw[:80]:
+            continue
+        try:
+            t = json.loads(_html.unescape(raw))["props"]["thread"]
+        except (ValueError, KeyError, TypeError):
+            continue
+        if t.get("type") != "Deal" or not t.get("title") or not t.get("titleSlug"):
+            continue
+        link = f"https://www.mydealz.de/deals/{t['titleSlug']}-{t['threadId']}"
+        items.append({
+            "title": t["title"].strip(), "link": link, "guid": link,
+            "published": t.get("publishedAt"),                  # epoch 秒(RSS 是 RFC 822 字符串)
+            "merchant": (t.get("merchant") or {}).get("merchantName"),
+            "price_cents": _eur_to_cents(t.get("price")) if t.get("price") else None,
+            "thread": t,
+        })
+    lm = _MYDEALZ_LAST_PAGE_RE.search(page_html)
+    return items, int(lm.group(1)) if lm else 1
+
+
 @task(retries=2, retry_delay_seconds=30)
 def collect_mydealz(run_id: str) -> dict:
     """mydealz 公开 RSS 分组 feed → raw.ci_offer（促销价，非每日必有）。"""
     logger = get_run_logger()
-    stats = {"pages": 0, "offers": 0, "unmatched": 0, "items": 0}
+    stats = {"pages": 0, "offers": 0, "unmatched": 0, "items": 0, "contract": 0}
     today = date.today()
     products = load_products()
     rows, seen = [], set()
@@ -499,6 +556,9 @@ def collect_mydealz(run_id: str) -> dict:
                                      it["title"], it["link"])
                 continue
             if it["price_cents"] is None:
+                continue
+            if is_contract_deal(it["title"]):     # 合约捆绑价不是售价，只进提及层
+                stats["contract"] += 1
                 continue
             merchant = (it["merchant"] or "mydealz")[:200]
             key = (pid, merchant)

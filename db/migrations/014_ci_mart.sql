@@ -18,6 +18,7 @@
 --     采样有缺口时(抓取失败/被封)不要直接把 delta 当日增量，须先除以间隔天数。
 --     此处沿用 mart.v_psi 的 weeks_since_prev 惯例。
 --   · 金额一律 cents 存、EUR 出;total = 售价 + 运费，售价缺失则为空(不补 0)。
+--   · 每个视图末尾带 line(情报线，见 012)，看板按它各出一个;价差只在同线内算。
 --
 -- !! 视图列顺序 !!
 --   CREATE OR REPLACE VIEW 不允许在列表中间插列，**新列一律追加在末尾**。
@@ -46,13 +47,14 @@ SELECT
     round(max(o.total_cents)    / 100.0, 2)               AS max_total_eur,
     round((percentile_cont(0.5) WITHIN GROUP (ORDER BY o.total_cents))::numeric / 100.0, 2)
                                                           AS median_total_eur,
-    round(min(o.price_cents)    / 100.0, 2)               AS min_price_eur
+    round(min(o.price_cents)    / 100.0, 2)               AS min_price_eur,
+    p.line
 FROM raw.ci_offer o
 JOIN core.ci_product p ON p.product_id = o.product_id
 LEFT JOIN core.ci_source s ON s.source_code = o.source_code
 WHERE o.total_cents IS NOT NULL
 GROUP BY o.observed_on, o.product_id, p.brand, p.display_name, p.is_own,
-         o.source_code, s.display_name;
+         o.source_code, s.display_name, p.line;
 
 COMMENT ON VIEW mart.v_ci_price_daily IS
   '每日×产品×源的价格带(到手价:售价+运费);自家与竞品同表，用 is_own 拆图例';
@@ -78,7 +80,8 @@ SELECT
     (t.review_count - lag(t.review_count) OVER w)         AS review_delta,
     -- BSR 越小越好，故取 lag - current：正数 = 排名上升(变好)
     (lag(t.bsr_rank) OVER w - t.bsr_rank)                 AS bsr_improvement,
-    round(t.price_cents / 100.0, 2)                       AS price_eur
+    round(t.price_cents / 100.0, 2)                       AS price_eur,
+    p.line
 FROM raw.ci_listing_stat t
 JOIN core.ci_product p ON p.product_id = t.product_id
 WINDOW w AS (PARTITION BY t.product_id, t.source_code ORDER BY t.observed_on);
@@ -100,11 +103,12 @@ SELECT
     s.layer                                               AS source_layer,
     count(*)                                              AS mention_cnt,
     count(DISTINCT m.author_hash)                         AS author_cnt,
-    sum(coalesce((m.engagement ->> 'score')::numeric, 0)) AS engagement_score
+    sum(coalesce((m.engagement ->> 'score')::numeric, 0)) AS engagement_score,
+    p.line
 FROM raw.ci_mention m
 JOIN core.ci_product p ON p.product_id = m.product_id
 LEFT JOIN core.ci_source s ON s.source_code = m.source_code
-GROUP BY 1, m.product_id, p.brand, p.display_name, p.is_own, m.source_code, s.layer;
+GROUP BY 1, m.product_id, p.brand, p.display_name, p.is_own, m.source_code, s.layer, p.line;
 
 COMMENT ON VIEW mart.v_ci_share_of_voice IS
   '每周×产品×源的提及量/独立作者数;engagement_score 是各源自报热度的粗略归一，跨源比较仅供参考';
@@ -137,7 +141,8 @@ SELECT
       replace(replace(replace(replace(
         coalesce(nullif(m.title, ''), m.url, '(no title)'),
         '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), '"', '&quot;') ||
-      '</a>'                                              AS title_link
+      '</a>'                                              AS title_link,
+    p.line
 FROM raw.ci_mention m
 JOIN core.ci_product p  ON p.product_id  = m.product_id
 JOIN core.ci_source  s  ON s.source_code = m.source_code AND s.layer = 'media';
@@ -181,11 +186,12 @@ men AS (
     FROM raw.ci_mention WHERE product_id IS NOT NULL
     GROUP BY 1, 2
 ),
-own_price AS (             -- 自家当日最优价，供竞品行算价差
-    SELECT p.d, min(p.best_total_cents) AS own_best_cents
+own_price AS (             -- 自家当日最优价，供竞品行算价差。按情报线分：
+                           -- imoo 手表绝不能拿 HUTT 擦窗机的价格去比
+    SELECT p.d, cp.line, min(p.best_total_cents) AS own_best_cents
     FROM price p
     JOIN core.ci_product cp ON cp.product_id = p.product_id AND cp.is_own
-    GROUP BY p.d
+    GROUP BY p.d, cp.line
 )
 SELECT
     sp.d                                                  AS observed_on,
@@ -205,15 +211,17 @@ SELECT
         RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW
     )                                                     AS mentions_7d,
     -- 相对自家最优价的价差：正数 = 该款比我们贵。自家行恒为 0
+    -- 同一条线里有多款自家产品时(imoo 四款)，基准取当日自家最低价
     round((pr.best_total_cents - op.own_best_cents) / 100.0, 2)
-                                                          AS price_gap_vs_own_eur
+                                                          AS price_gap_vs_own_eur,
+    cp.line
 FROM spine sp
 JOIN core.ci_product cp ON cp.product_id = sp.product_id
 LEFT JOIN price     pr ON pr.d = sp.d AND pr.product_id = sp.product_id
 LEFT JOIN amz       a  ON a.d  = sp.d AND a.product_id  = sp.product_id
 LEFT JOIN rev       rv ON rv.d = sp.d AND rv.product_id = sp.product_id
 LEFT JOIN men       mn ON mn.d = sp.d AND mn.product_id = sp.product_id
-LEFT JOIN own_price op ON op.d = sp.d;
+LEFT JOIN own_price op ON op.d = sp.d AND op.line = cp.line;
 
 COMMENT ON VIEW mart.v_ci_compare IS
   '主视图:自家(is_own)与竞品逐日并排的价格/BSR/评分/评论/声量 + 相对自家最优价的价差;'

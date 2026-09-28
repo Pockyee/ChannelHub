@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from ci_common import (
     FetchBlocked,
@@ -38,7 +38,8 @@ from ci_price import _active_sources  # 单一实现，避免两份 active 判�
 from prefect import flow, get_run_logger, task
 from prefect.runtime import flow_run
 
-SUBREDDITS = ("staubsaugerroboter", "de", "Haushalt", "smarthome", "wohnen")
+# 前五个偏 hutt 线(家居/擦窗)，Eltern / smartwatch 给 imoo 线(儿童手表)
+SUBREDDITS = ("staubsaugerroboter", "de", "Haushalt", "smarthome", "wohnen", "Eltern", "smartwatch")
 
 
 def _write_mentions(rows) -> int:
@@ -132,10 +133,36 @@ def collect_reddit(run_id: str) -> dict:
 # ===========================================================================
 # YouTube
 # ===========================================================================
+# 只要德国市场的视频。regionCode=DE / relevanceLanguage=de 只是给排序的「提示」，
+# 不是过滤：2026-09-28 首跑按 order=date 取，184 条视频里只有约 30 条是德语，
+# 其余是泰国配件店、imoo 越南/泰国官方号、意大利语带货号 —— imoo 在亚洲体量大，
+# 按「最新」排全球新视频会把德语内容挤没。所以：
+#   · 按相关度检索，两个窗口各一次：近一年（撑起看板的一年视图）+ 近 14 天
+#     （单次只回 25 条，新视频容易被一年内的高播放老视频挤掉）；
+#   · 视频必须判为德语才入库。
+# **只收视频，不收评论**（2026-09-28 用户决定：看板上只看视频）。
+# 配额：search 100 单位/次，videos 1 单位/次；12 款 × 2 窗口 ≈ 2,450，日额度 10,000 内。
+YT_WINDOWS_DAYS = (365, 14)
+# 没声明语言时的德语判据：标题+描述里至少出现两个不同的德语常用词。
+# 刻意不收 test / kinder 这类英语里也常见、或已被德语品类词借走的词。
+YT_GERMAN_WORDS = re.compile(
+    r"\b(und|der|die|das|mit|für|nicht|ist|ich|wir|sie|auch|eine?n?|oder|wie|zum|zur|bei"
+    r"|eltern|deutsch|erfahrung(?:en)?|kinderuhr|uhr)\b", re.IGNORECASE)
+
+
+def yt_is_german(snippet: dict) -> bool:
+    """YouTube 视频是否德语：优先信声明语言，没声明才看文字。"""
+    lang = (snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage") or "").lower()
+    if lang:
+        return lang.split("-")[0] == "de"
+    text = f"{snippet.get('title') or ''}\n{snippet.get('description') or ''}"
+    return len({m.lower() for m in YT_GERMAN_WORDS.findall(text)}) >= 2
+
+
 @task(retries=2, retry_delay_seconds=30)
 def collect_youtube(run_id: str) -> dict:
     logger = get_run_logger()
-    stats = {"queries": 0, "mentions": 0, "comments": 0}
+    stats = {"queries": 0, "videos_seen": 0, "videos_non_german": 0, "mentions": 0}
     key = _env("YOUTUBE_API_KEY")
     if not key:
         logger.info("YouTube: 未配置 YOUTUBE_API_KEY，跳过")
@@ -144,27 +171,39 @@ def collect_youtube(run_id: str) -> dict:
     import httpx
     base = "https://www.googleapis.com/youtube/v3"
     products = load_products()
+    now = datetime.now(timezone.utc)
     rows = []
+    done: set[str] = set()      # 多个检索会搜回同一条视频；_fan_out 已按文本挂全部型号
     for p in products:
-        stats["queries"] += 1
-        r = httpx.get(f"{base}/search", params={
-            "part": "snippet", "q": p.display_name, "type": "video",
-            "regionCode": "DE", "relevanceLanguage": "de", "maxResults": 25,
-            "order": "date", "key": key}, timeout=30)
-        if r.status_code != 200:
-            logger.warning("YouTube search HTTP %s: %s", r.status_code, r.text[:200])
-            continue
-        vids = [it["id"]["videoId"] for it in r.json().get("items", [])
-                if it.get("id", {}).get("videoId")]
+        vids: list[str] = []
+        for days in YT_WINDOWS_DAYS:
+            stats["queries"] += 1
+            r = httpx.get(f"{base}/search", params={
+                "part": "snippet", "q": p.display_name, "type": "video",
+                "regionCode": "DE", "relevanceLanguage": "de", "maxResults": 25,
+                "order": "relevance",
+                "publishedAfter": (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "key": key}, timeout=30)
+            if r.status_code != 200:
+                logger.warning("YouTube search HTTP %s: %s", r.status_code, r.text[:200])
+                continue
+            vids += [it["id"]["videoId"] for it in r.json().get("items", [])
+                     if it.get("id", {}).get("videoId")]
+        vids = [v for v in dict.fromkeys(vids) if v not in done]
+        done.update(vids)
         if not vids:
             continue
 
         rs = httpx.get(f"{base}/videos", params={
-            "part": "snippet,statistics", "id": ",".join(vids), "key": key}, timeout=30)
+            "part": "snippet,statistics", "id": ",".join(vids[:50]), "key": key}, timeout=30)
         if rs.status_code != 200:
             continue
         for v in rs.json().get("items", []):
             sn, st = v.get("snippet", {}), v.get("statistics", {})
+            stats["videos_seen"] += 1
+            if not yt_is_german(sn):
+                stats["videos_non_german"] += 1
+                continue
             text = f"{sn.get('title','')}\n{sn.get('description','')}"
             eng = json.dumps({"views": st.get("viewCount"), "likes": st.get("likeCount"),
                               "comments": st.get("commentCount"),
@@ -176,24 +215,6 @@ def collect_youtube(run_id: str) -> dict:
                 author_hash(sn.get("channelTitle")), _ts(sn.get("publishedAt")),
                 eng, None, run_id))
 
-            # 视频评论:讨论层的真正内容所在
-            rc = httpx.get(f"{base}/commentThreads", params={
-                "part": "snippet", "videoId": v["id"], "maxResults": 50,
-                "order": "relevance", "textFormat": "plainText", "key": key}, timeout=30)
-            if rc.status_code != 200:
-                continue
-            for c in rc.json().get("items", []):
-                top = c.get("snippet", {}).get("topLevelComment", {}).get("snippet", {})
-                body = top.get("textDisplay") or ""
-                # 评论继承所属视频的产品归属：评论本身常只说「它」
-                rows += _fan_out(products, text + "\n" + body,
-                                 lambda pid, c=c, top=top, body=body, v=v: (
-                    pid, "youtube", "c:" + c["id"],
-                    f"https://www.youtube.com/watch?v={v['id']}&lc={c['id']}",
-                    None, body, "de", author_hash(top.get("authorDisplayName")),
-                    _ts(top.get("publishedAt")),
-                    json.dumps({"likes": top.get("likeCount")}), None, run_id))
-                stats["comments"] += 1
     stats["mentions"] = _write_mentions(rows)
     return stats
 
@@ -244,6 +265,67 @@ def collect_mydealz_threads(run_id: str) -> dict:
                 it["title"][:1000], None, "de", None,
                 _ts(_rfc822(it.get("published"))), eng, snap, run_id))
     stats["mentions"] = _write_mentions(rows)
+    return stats
+
+
+# 一次性补抓:RSS 只给最新 30 条，新加的分组/新加的产品线看不到之前的帖子。
+# 分组网页能往回翻几个月(页数有上限，越界 410),翻一遍补进提及层即可 —— 之后日常
+# 采集靠 RSS 往前滚。只写提及、不写报价：补回来的是历史促销，raw.ci_offer 的 observed_on
+# 是「观测到的那天」，拿发帖日冒充观测日会让价格曲线出现当时并没看到的点。
+BACKFILL_MAX_PAGES = 20      # 单分组翻页硬上限，防站点改了 lastPage 语义后无限翻
+
+
+@flow(name="ci-mydealz-backfill")
+def ci_mydealz_backfill(groups: list[str] | None = None) -> dict:
+    """mydealz 分组网页全部可翻页 → raw.ci_mention。幂等：external_id 与 RSS 路径一致。
+
+    手动跑(不挂排期):
+      docker exec -w /app/flows channelhub-prefect-worker python -c \
+        "from ci_social import ci_mydealz_backfill; ci_mydealz_backfill()"
+    """
+    from ci_price import mydealz_groups, parse_mydealz_listing
+
+    logger = get_run_logger()
+    run_id = str(getattr(flow_run, "id", "") or "")
+    stats = {"pages": 0, "items": 0, "mentions": 0, "gone": 0}
+    products = load_products()
+    rows, seen = [], set()
+    for group in groups or mydealz_groups():
+        last = 1
+        page = 1
+        while page <= min(last, BACKFILL_MAX_PAGES):
+            url = f"https://www.mydealz.de/gruppe/{group}" + (f"?page={page}" if page > 1 else "")
+            try:
+                status, body, ctype = fetch(url, mode="http")
+            except FetchBlocked as e:
+                logger.warning("mydealz %s p%s 被拦: %s", group, page, e)
+                break
+            if status == 410:                # 越过可翻页上限
+                stats["gone"] += 1
+                break
+            if status != 200:
+                logger.warning("mydealz %s p%s HTTP %s", group, page, status)
+                break
+            stats["pages"] += 1
+            snap = snapshot("mydealz", url, status, body, ctype, run_id=run_id)
+            items, last = parse_mydealz_listing(body.decode("utf-8", "replace"))
+            for it in items:
+                if it["link"] in seen:       # 同一帖挂在多个分组里
+                    continue
+                seen.add(it["link"])
+                stats["items"] += 1
+                t = it["thread"]
+                eng = json.dumps({"merchant": it["merchant"], "price_cents": it["price_cents"],
+                                  "group": group, "temperature": t.get("temperature"),
+                                  "comments": t.get("commentCount")})
+                rows += _fan_out(products, it["title"],
+                                 lambda pid, it=it, eng=eng, snap=snap: (
+                    pid, "mydealz", it["guid"], it["link"], it["title"][:1000], None, "de",
+                    None, _ts(it["published"]), eng, snap, run_id))
+            page += 1
+        logger.info("mydealz %s: 翻到第 %s/%s 页", group, page - 1, last)
+    stats["mentions"] = _write_mentions(rows)
+    logger.info("ci-mydealz-backfill 汇总: %s", stats)
     return stats
 
 

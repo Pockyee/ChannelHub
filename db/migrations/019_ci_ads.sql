@@ -80,8 +80,19 @@ CREATE TABLE IF NOT EXISTS core.ci_ad_advertiser (
     advertiser_name text,                   -- 仅备注用;真实名称以源返回为准
     active          boolean NOT NULL DEFAULT true,
     notes           text,
-    PRIMARY KEY (source_code, advertiser_id)
+    -- 主键含 brand:'*'(禁用按名检索)是按品牌的开关,同一个源上可以有多个品牌各自禁用
+    PRIMARY KEY (source_code, brand, advertiser_id)
 );
+-- 旧库的主键是 (source_code, advertiser_id) —— 每个源只能登记一行 '*',第二个品牌
+-- (2026-09-28 的 TCL,HUTT 已占了 google_ads/*)装载直接撞主键。换成含 brand 的主键。
+DO $$
+BEGIN
+  IF (SELECT array_length(conkey, 1) FROM pg_constraint
+      WHERE conrelid = 'core.ci_ad_advertiser'::regclass AND contype = 'p') = 2 THEN
+    ALTER TABLE core.ci_ad_advertiser DROP CONSTRAINT ci_ad_advertiser_pkey;
+    ALTER TABLE core.ci_ad_advertiser ADD PRIMARY KEY (source_code, brand, advertiser_id);
+  END IF;
+END $$;
 COMMENT ON TABLE core.ci_ad_advertiser IS
   '广告层广告主覆盖(可选);由 db/seed/ci_ad_advertiser.csv 经 load_ci_ad_advertiser.sh 同步。'
   'active=true 白名单(只按 id 取) / false 黑名单(按名检索时排除) / id=* 且 false 禁用按名检索';
@@ -134,7 +145,9 @@ CREATE SCHEMA IF NOT EXISTS mart;
 
 CREATE OR REPLACE VIEW mart.v_ci_ad_detail AS
 WITH b AS (
-    SELECT brand, bool_or(is_own) AS is_own FROM core.ci_product GROUP BY brand
+    -- 广告只有品牌没有型号，故按品牌归线;一个品牌只属于一条线(见 012 line 注释)
+    SELECT brand, bool_or(is_own) AS is_own, min(line) AS line
+    FROM core.ci_product GROUP BY brand
 )
 SELECT
     a.first_shown,
@@ -181,7 +194,8 @@ SELECT
       '</a>'                                              AS ad_link,
     a.ad_id,
     a.first_seen_at,
-    a.last_seen_at
+    a.last_seen_at,
+    b.line
 FROM raw.ci_ad a
 LEFT JOIN b ON b.brand = a.brand;
 

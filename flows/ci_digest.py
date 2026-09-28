@@ -1,7 +1,11 @@
 """ChannelHub — 竞品情报：把一段时间的提及交给 Claude 出一份自然语言简报。
 
 输入 raw.ci_mention（reddit / youtube / mydealz / amazon / instagram / 媒体），
-输出 mart.ci_digest 一行。周频，跑在 ci-media（周一 06:00 UTC）之后。
+每条情报线（core.ci_product.line）输出 mart.ci_digest 一行，scope = 线代码。
+周频，跑在 ci-media（周一 06:00 UTC）之后。
+
+按线分开出，是因为两条线品类完全不同（擦窗机 vs 儿童手表）：混在一份里，模型会拿
+手表的讨论去对比擦窗机，「用户在意什么」的话题清单也对不上。
 
 与其它 ci_* flow 的两处刻意差异：
   1) **dry-run 语义不同**。别的 flow 干跑是「照常抓取解析、不写库」，因为抓取
@@ -21,7 +25,18 @@ from prefect import flow, get_run_logger, task
 
 MODEL = "claude-opus-5"
 
-SYSTEM = """你是一名竞品情报分析师，服务于一家在德国市场销售擦窗机器人的公司。
+# 情报线 → 品类名 + 「用户在意什么」的话题提示。新增一条线时在这里补一项；
+# 没补的线也照常出简报，只是话题提示退回通用版（日志会提示）。
+LINES = {
+    "hutt": {"category": "擦窗机器人",
+             "topics": "清洁效果、噪音、边角覆盖、安全绳、App、续航、价格"},
+    "imoo": {"category": "儿童智能手表",
+             "topics": "定位精度、通话与视频质量、续航、家长 App、防水、SIM 卡与资费、"
+                       "佩戴舒适度、价格"},
+}
+GENERIC_LINE = {"category": "消费电子产品", "topics": "产品体验、质量问题、App、价格"}
+
+SYSTEM = """你是一名竞品情报分析师，服务于一家在德国市场销售{category}的公司。
 
 你会收到一批从公开渠道采集的「提及」（Reddit / YouTube 视频与评论 / mydealz 优惠帖 /
 Amazon 评论 / Instagram 贴文 / 德语媒体评测）。每条标注了来源、日期、命中的产品、
@@ -30,8 +45,7 @@ Amazon 评论 / Instagram 贴文 / 德语媒体评测）。每条标注了来源
 写一份中文简报，只讲数据里真实出现的内容。要求：
 
 1. **总体声量**：这段时间讨论集中在哪些产品、哪些渠道，跟数据里能看出的前期相比如何。
-2. **用户在意什么**：反复出现的具体话题（清洁效果、噪音、边角覆盖、安全绳、App、
-   续航、价格），给出你判断的依据。
+2. **用户在意什么**：反复出现的具体话题（{topics}），给出你判断的依据。
 3. **正负面**：分别举出具体例子，注明来源与日期。
 4. **价格与促销**：出现的价格点、折扣、渠道。
 5. **竞品动向**：竞品被讨论的方式与自家有何不同。
@@ -46,7 +60,18 @@ Amazon 评论 / Instagram 贴文 / 德语媒体评测）。每条标注了来源
 - 不要复述提及列表，要给出结论。"""
 
 
-def _load_mentions(window_days: int) -> list[dict]:
+def _system(line: str) -> str:
+    return SYSTEM.format(**LINES.get(line, GENERIC_LINE))
+
+
+def _active_lines() -> list[str]:
+    with _pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT line FROM core.ci_product WHERE active ORDER BY 1")
+            return [r[0] for r in cur.fetchall()]
+
+
+def _load_mentions(window_days: int, line: str) -> list[dict]:
     """窗口内的提及。按产品和时间排序，让同一款的讨论在提示里挨在一起。
 
     !! 按 ingested_at 过滤，不是 published_at。!!
@@ -68,11 +93,12 @@ def _load_mentions(window_days: int) -> list[dict]:
         FROM raw.ci_mention m
         JOIN core.ci_product p ON p.product_id = m.product_id
         WHERE m.ingested_at > now() - make_interval(days => %s)
+          AND p.line = %s
         ORDER BY p.display_name, m.published_at, m.source_code
     """
     with _pg() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (window_days, window_days))
+            cur.execute(sql, (window_days, window_days, line))
             cols = [d[0] for d in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
@@ -91,15 +117,18 @@ def _render(rows: list[dict]) -> str:
 
 
 @task(retries=1, retry_delay_seconds=120)
-def build_digest(window_days: int) -> dict:
+def build_digest(window_days: int, line: str) -> dict:
     logger = get_run_logger()
-    rows = _load_mentions(window_days)
+    if line not in LINES:
+        logger.warning("情报线 %s 没有在 LINES 里配置品类，简报用通用话题提示", line)
+    system = _system(line)
+    rows = _load_mentions(window_days, line)
     stats = {"mentions": len(rows), "input_tokens": 0, "output_tokens": 0, "written": 0}
 
     if not rows:
         # 不是错误：这个品类本来就冷，一周零声量是可能的。不调 LLM、不写空记录 ——
         # 看板上的空档如实反映「那周确实没人讨论」。
-        logger.info("窗口内 0 条提及，跳过（不生成空简报）")
+        logger.info("[%s] 窗口内 0 条提及，跳过（不生成空简报）", line)
         return stats
 
     body = _render(rows)
@@ -113,11 +142,12 @@ def build_digest(window_days: int) -> dict:
     # 入口处校验规模。超限显式失败，不截断（见模块 docstring 第 2 点）。
     ceiling = int(_env("CI_DIGEST_MAX_INPUT_TOKENS") or "400000")
     counted = client.messages.count_tokens(
-        model=MODEL, system=SYSTEM,
+        model=MODEL, system=system,
         messages=[{"role": "user", "content": user_msg}],
     ).input_tokens
     stats["input_tokens"] = counted
-    logger.info("本期 %d 条提及 / %d input tokens / 源: %s", len(rows), counted, sources)
+    logger.info("[%s] 本期 %d 条提及 / %d input tokens / 源: %s",
+                line, len(rows), counted, sources)
     if counted > ceiling:
         raise RuntimeError(
             f"输入 {counted} tokens 超过上限 {ceiling}。宁可失败也不截断 —— "
@@ -132,7 +162,7 @@ def build_digest(window_days: int) -> dict:
     resp = client.beta.messages.create(
         model=MODEL,
         max_tokens=16000,
-        system=SYSTEM,
+        system=system,
         thinking={"type": "adaptive"},
         # 拒答兜底：分类器误判时服务端换模型重跑，不至于让一次定时任务空手而归。
         # 本用例（德语家电讨论）几乎不可能触发，留着是保险，去掉也不影响功能。
@@ -159,7 +189,7 @@ def build_digest(window_days: int) -> dict:
                 "INSERT INTO mart.ci_digest "
                 "(digest_on, window_days, scope, mention_cnt, source_codes, summary, "
                 " model, input_tokens, output_tokens) "
-                "VALUES (%s,%s,'all',%s,%s,%s,%s,%s,%s) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT (digest_on, window_days, scope) DO UPDATE SET "
                 "  mention_cnt = EXCLUDED.mention_cnt, "
                 "  source_codes = EXCLUDED.source_codes, "
@@ -168,7 +198,7 @@ def build_digest(window_days: int) -> dict:
                 "  input_tokens = EXCLUDED.input_tokens, "
                 "  output_tokens = EXCLUDED.output_tokens, "
                 "  generated_at = now()",
-                (date.today(), window_days, len(rows), sources, summary,
+                (date.today(), window_days, line, len(rows), sources, summary,
                  resp.model, resp.usage.input_tokens, resp.usage.output_tokens),
             )
         conn.commit()
@@ -180,16 +210,21 @@ def build_digest(window_days: int) -> dict:
 def ci_digest() -> dict:
     logger = get_run_logger()
     window_days = int(_env("CI_DIGEST_WINDOW_DAYS") or "7")
-    try:
-        stats = build_digest(window_days)
-    except Exception as e:
-        logger.warning("简报生成失败: %s", e, exc_info=True)
+    stats, failed = {}, []
+    # 一条线失败不拖累另一条：逐线出、逐线告警，最后再统一抛错
+    for line in _active_lines():
         try:
-            maybe_alert("digest", "digest_failed", f"{type(e).__name__}: {e}", logger)
-        except Exception:
-            logger.warning("告警本身也失败了")
-        raise
+            stats[line] = build_digest(window_days, line)
+        except Exception as e:
+            failed.append(line)
+            logger.warning("[%s] 简报生成失败: %s", line, e, exc_info=True)
+            try:
+                maybe_alert(f"digest_{line}", "digest_failed", f"{type(e).__name__}: {e}", logger)
+            except Exception:
+                logger.warning("告警本身也失败了")
     logger.info("ci-digest 汇总: %s", stats)
+    if failed:
+        raise RuntimeError(f"简报生成失败的情报线: {failed}")
     return stats
 
 

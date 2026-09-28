@@ -70,17 +70,33 @@ def load_seed_products():
                 kind=(r.get("kind") or "model").strip() or "model",
                 model=r["model"].strip(),
             ))
+            LINE_OF[r["product_id"].strip()] = (r.get("line") or "hutt").strip() or "hutt"
     return out
 
 
+LINE_OF: dict[str, str] = {}      # product_id → 情报线(Product 数据类不带 line,单独记)
+
+
 ALL_ROWS = load_seed_products()
-PRODUCTS = [p for p in ALL_ROWS if p.kind == "model"]     # 与 load_products() 默认一致
+ALL_MODELS = [p for p in ALL_ROWS if p.kind == "model"]   # 与 load_products() 默认一致(不分线)
+# 第 2–11 节是 hutt 线(擦窗机)的断言，只拿本线产品测;两条线混在一起的串线检查见第 12 节
+PRODUCTS = [p for p in ALL_MODELS if LINE_OF[p.product_id] == "hutt"]
 SERIES = [p for p in ALL_ROWS if p.kind == "series"]
+IMOO = [p for p in ALL_MODELS if LINE_OF[p.product_id] == "imoo"]
 
 # ---------------------------------------------------------------------------
 print("1) seed CSV 完整性")
-check(len(PRODUCTS) == 5, f"5 款产品(读到 {len(PRODUCTS)})")
-check(sum(1 for p in PRODUCTS if p.is_own) == 1, "恰好一款 is_own")
+check(len(PRODUCTS) == 6, f"hutt 线 6 款产品(读到 {len(PRODUCTS)})")
+check(sum(1 for p in PRODUCTS if p.is_own) == 1, "hutt 线恰好一款 is_own")
+check(len(IMOO) == 6, f"imoo 线 6 款产品(读到 {len(IMOO)})")
+check({p.product_id for p in IMOO if p.is_own} == {"imoo-z1", "imoo-z3", "imoo-z7", "imoo-x10"},
+      "imoo 线自家为 Z1/Z3/Z7/X10")
+check(set(LINE_OF.values()) == {"hutt", "imoo"}, f"line 只取 hutt / imoo(读到 {set(LINE_OF.values())})")
+_brand_lines = {}
+for p in ALL_ROWS:
+    _brand_lines.setdefault(p.brand, set()).add(LINE_OF[p.product_id])
+check(all(len(v) == 1 for v in _brand_lines.values()),
+      "每个品牌只属于一条线(广告按品牌归线,见 019)", f"{_brand_lines}")
 check(all(p.brand_re and p.model_re for p in PRODUCTS), "每款都有 brand_regex 与 match_regex")
 check(all(p.kind in ("model", "series") for p in ALL_ROWS), "kind 只取 model / series")
 check([s.product_id for s in SERIES] == ["ecovacs-winbot"], f"系列兜底行(读到 {[s.product_id for s in SERIES]})")
@@ -99,6 +115,12 @@ POSITIVE = [
     ("Hutt 10 Fensterreinigungsroboter",                             "hutt-10"),
     ("ECOVACS Winbot Mini Fensterreinigungsroboter grau",             "ecovacs-winbot-mini"),
     ("Ecovacs Winbot Mini, grau",                                     "ecovacs-winbot-mini"),
+    ("Ecovacs Winbot Mini-Fensterroboter",                            "ecovacs-winbot-mini"),
+    ("Ecovacs Winbot Mini 2025 Angebot",                              "ecovacs-winbot-mini"),
+    # 两代 MINI 互斥:后面紧跟 2 的是二代
+    ("Ecovacs Winbot mini 2 Fensterputzroboter",                      "ecovacs-winbot-mini-2"),
+    ("ECOVACS WINBOT MINI2",                                          "ecovacs-winbot-mini-2"),
+    ("Ecovacs Winbot Mini-2 Fensterroboter",                          "ecovacs-winbot-mini-2"),
 ]
 for title, expect in POSITIVE:
     got, reason = match_product(title, PRODUCTS)
@@ -119,6 +141,9 @@ NEGATIVE = [
     # MINI 不得与 W 系列互串（品牌闸门 + 型号 token 都要成立）
     "Kärcher Mini Fensterreiniger",
     "HUTT Mini Fensterputzroboter",
+    # mini 必须紧跟 winbot：同一标题里有 Ecovacs 品牌 + 别的 mini 也不算(真实 mydealz 合集帖)
+    '[Joybuy App] TCL 65" Mini-LED TV, Eureka J15 Pro Ultra, Ecovacs Deebot T30C, KTC Gaming Monitor',
+    "Ecovacs Deebot Mini Saugroboter",
     # 完全无关
     "Kärcher WV 6 Plus Fenstersauger",
     "",
@@ -154,6 +179,15 @@ check(set(all_hits) == {"ecovacs-w2s-omni", "ecovacs-w3-omni"},
 CROSS = "HUTT 10 vs. ECOVACS Winbot W3 Omni — welcher Fensterputzroboter lohnt sich?"
 check(set(match_products_all(CROSS, PRODUCTS)) == {"hutt-10", "ecovacs-w3-omni"},
       "自家 vs 竞品对比文同时挂两款", f"实得 {match_products_all(CROSS, PRODUCTS)}")
+
+# ---------------------------------------------------------------------------
+print("5b) 两代 MINI:对比文两款都挂，一代文章不掉进系列兜底")
+_both = "Ecovacs Winbot Mini vs. Winbot Mini 2 im Vergleich"
+check(match_products_all(_both, PRODUCTS) == ["ecovacs-winbot-mini", "ecovacs-winbot-mini-2"],
+      "两代对比文同时挂 MINI 与 MINI 2", f"实得 {match_products_all(_both, PRODUCTS)}")
+_mini1 = "Ecovacs Winbot Mini im Test: Fensterputzroboter für 199 €"
+check(series_hits(_mini1, None, [], match_products_all(_mini1, PRODUCTS), PRODUCTS, SERIES) == [],
+      "一代 MINI 文章已点名型号，不再挂系列兜底")
 
 # ---------------------------------------------------------------------------
 print("6) 品牌闸门：型号 token 不得脱离品牌单独命中")
@@ -297,6 +331,55 @@ for title, found_by, want_models, want_series, label in [
 ]:
     got = media(title, found_by)
     check(got == (want_models, want_series), label, f"得到 {got}")
+
+# ---------------------------------------------------------------------------
+print("12) imoo 线(儿童手表)：imoo Z1/Z3/Z7/X10 vs Xplora XGO3/X6Play")
+# 用全部型号(两条线合起来)测 —— 采集层 load_products() 本来就不分线，
+# 所以这里同时锁死「手表不串到擦窗机、擦窗机不串到手表」
+for title, expect in [
+    ("imoo Watch Phone Z1 Kinder Smartwatch 4G mit GPS, blau",      "imoo-z1"),
+    ("imoo Z3 Kinder-Smartwatch mit Videoanruf",                    "imoo-z3"),
+    ("imoo Watch Phone Z7 4G Kinderuhr mit Dual-Kamera, schwarz",   "imoo-z7"),
+    ("imoo Watch Phone X10",                                        "imoo-x10"),
+    ("Xplora XGO3 Smartwatch für Kinder 4G, Schwarz",               "xplora-xgo3"),
+    ("XPLORA X GO 3 – Telefonuhr für Kinder",                       "xplora-xgo3"),
+    ("Xplora X6Play Kinder-Smartwatch inkl. 1 Monat Guthaben",      "xplora-x6play"),
+    ("Xplora X6 Play eSIM, Blau",                                   "xplora-x6play"),
+]:
+    got, reason = match_product(title, ALL_MODELS)
+    check(got == expect, f"{title!r} → {expect}", f"实得 {got} ({reason})")
+
+for title in [
+    "imoo Watch Phone Z6 Kinder Smartwatch",      # 未跟踪型号
+    "imoo Watch Phone Z10",                       # Z1 前缀陷阱
+    "imoo Z71 Sondermodell",                      # 数字粘连
+    "Xplora XGO2 Kinder-Smartwatch",              # 旧款
+    "Xplora X5 Play",                             # 旧款
+    "Xplora X6 Kinder-Smartwatch",                # 不带 Play
+    "Garmin Bounce Kinder-Smartwatch Z3",         # 型号 token 无品牌
+    "Apple Watch Series 10 X10 Edition",          # 同上
+]:
+    got, reason = match_product(title, ALL_MODELS)
+    check(got is None, f"{title!r} → 不命中", f"误配成 {got} ({reason})")
+
+for title in [
+    "Armband für imoo Watch Phone Z7, Silikon",
+    "Schutzfolie für Xplora X6Play (3 Stück)",
+    "Panzerglas Displayschutz kompatibel mit imoo Z1",
+    "Ladekabel für Xplora XGO3",
+]:
+    check(match_product(title, ALL_MODELS)[0] is None, f"{title!r} → 配件不计为整机")
+check(match_product("imoo Watch Phone Z7 mit Silikon-Armband", ALL_MODELS)[0] == "imoo-z7",
+      "整机标题里的「mit …-Armband」不误判为配件")
+
+# 串线:HUTT 10 的型号 token 是 10、imoo X10 的也是 10 —— 品牌闸门必须把它们分开
+check(match_product("HUTT 10 Fensterputzroboter", ALL_MODELS)[0] == "hutt-10",
+      "HUTT 10 不被 imoo X10 吃掉")
+check(match_product("imoo Watch Phone X10", ALL_MODELS)[0] == "imoo-x10",
+      "imoo X10 不被 HUTT 10 吃掉")
+check(set(match_products_all("imoo Z7 vs. Xplora X6Play: Welche Kinderuhr ist besser?",
+                             ALL_MODELS)) == {"imoo-z7", "xplora-x6play"},
+      "自家 vs 竞品对比文同时挂两款(imoo 线)")
 
 # ---------------------------------------------------------------------------
 print()

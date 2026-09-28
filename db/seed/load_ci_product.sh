@@ -39,7 +39,7 @@ fi
 
 # --- 1) 产品主数据 -----------------------------------------------------------
 "${PSQL[@]}" -c "TRUNCATE core.ci_product_stage;"
-"${PSQL[@]}" -c "\copy core.ci_product_stage(product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes,kind) FROM STDIN WITH (FORMAT csv, HEADER true)" < "$CSV_PROD"
+"${PSQL[@]}" -c "\copy core.ci_product_stage(product_id,brand,model,display_name,ean,is_own,active,brand_regex,match_regex,notes,kind,line) FROM STDIN WITH (FORMAT csv, HEADER true)" < "$CSV_PROD"
 echo "--- 产品同步(removed / upserted / total)---"
 "${PSQL[@]}" -c "SELECT * FROM core.sync_ci_product();"
 

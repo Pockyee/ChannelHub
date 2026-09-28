@@ -17,6 +17,9 @@
   core.ci_ad_advertiser 里给某品牌登记了广告主 id → 精确按 id 取；
   没登记 → 退回按品牌名检索，再用 core.ci_product.brand_regex 过「广告主名」，
   排掉转售商和同名公司。不知道 id 时先跑发现命令（见文件末尾 / 文档「广告层」）。
+  Google 另有一条：core.ci_ad_domain 给某品牌登记了落地页域名 → 每轮先去透明度中心
+  按域名取素材 id，再按素材 id 取。用于走代投代理**共用账户**的品牌（imoo 挂在
+  BlueVision 的账户下，该账户 6.7 万条素材只有 93 条是 imoo），理由见 021 文件头。
 
 !! 两处硬约束 !!
   1) Meta 的 ad_snapshot_url 与分页 paging.next 都**内嵌 access_token**。前者根本不请求，
@@ -128,29 +131,42 @@ def advertiser_config() -> tuple[dict, dict]:
     return allow, deny
 
 
-def _prune(source_code: str, brands, allow: dict, deny: dict) -> int:
+def _prune(source_code: str, brands, allow: dict, deny: dict,
+           domain_cr: dict[str, set[str]] | None = None) -> int:
     """配置收窄后清掉旧行 —— raw.ci_ad 是状态型 upsert，不清就永远留着。
 
-    删两类：① 被显式排除的广告主；② 白名单 / 禁用按名检索的品牌下，不在白名单里的广告主
-    （多半是之前按名检索误入的同名公司）。只在该源本轮采集成功后调用。
+    删三类：① 被显式排除的广告主；② 白名单 / 禁用按名检索的品牌下，不在白名单里的广告主
+    （多半是之前按名检索误入的同名公司）；③ 登记了域名的品牌下，既不在白名单账户、
+    也不在本轮域名素材清单里的广告。只在该源本轮采集成功后调用。
+    domain_cr 只放**本轮域名检索全部成功**的品牌 —— 检索失败时不能据此删行。
     """
     if is_dry_run():
         return 0
-    restricted = [b for b in brands
-                  if allow.get((source_code, b)) or OPT_OUT in deny.get((source_code, b), set())]
+    domain_cr = domain_cr or {}
+    # 登记了域名的品牌不走 ② —— 它的素材可以挂在白名单以外的账户下（代理共用账户）
+    restricted = [b for b in brands if b not in domain_cr and (
+        allow.get((source_code, b)) or OPT_OUT in deny.get((source_code, b), set()))]
     allowed = [a for (src, _), ids in allow.items() if src == source_code for a in ids]
     excluded = [a for (src, _), ids in deny.items() if src == source_code
                 for a in ids if a != OPT_OUT]
-    if not restricted and not excluded:
+    if not restricted and not excluded and not domain_cr:
         return 0
+    n = 0
     with _pg() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM raw.ci_ad WHERE source_code = %s AND ("
-                "  (brand = ANY(%s) AND NOT advertiser_id = ANY(%s))"
-                "  OR advertiser_id = ANY(%s))",
-                (source_code, restricted, allowed, excluded))
-            n = cur.rowcount
+            if restricted or excluded:
+                cur.execute(
+                    "DELETE FROM raw.ci_ad WHERE source_code = %s AND ("
+                    "  (brand = ANY(%s) AND NOT advertiser_id = ANY(%s))"
+                    "  OR advertiser_id = ANY(%s))",
+                    (source_code, restricted, allowed, excluded))
+                n += cur.rowcount
+            for brand, cids in domain_cr.items():
+                cur.execute(
+                    "DELETE FROM raw.ci_ad WHERE source_code = %s AND brand = %s"
+                    "  AND NOT advertiser_id = ANY(%s) AND NOT ad_id = ANY(%s)",
+                    (source_code, brand, allow.get((source_code, brand), []), sorted(cids)))
+                n += cur.rowcount
         conn.commit()
     return n
 
@@ -428,13 +444,16 @@ def build_google_sql(cols: dict[str, str | None], schema: dict[str, dict],
     ]
     name_col = _col_expr(cols["advertiser_name"])
     id_col = _col_expr(cols["advertiser_id"])
+    creative_col = _col_expr(cols["creative_id"])
     whens, conds = [], []
     for i, (brand, mode, val, *rest) in enumerate(brand_specs):
-        if mode == "ids":
-            cond = f"{id_col} IN UNNEST(@ids_{i})"
-            params.append({"name": f"ids_{i}",
+        if mode in ("ids", "creatives"):
+            # ids = 广告主账户白名单；creatives = 域名检索得到的素材 id（021）
+            col, pname = (id_col, f"ids_{i}") if mode == "ids" else (creative_col, f"cr_{i}")
+            cond = f"{col} IN UNNEST(@{pname})"
+            params.append({"name": pname,
                            "parameterType": {"type": "ARRAY", "arrayType": {"type": "STRING"}},
-                           "parameterValue": {"arrayValues": [{"value": v} for v in val]}})
+                           "parameterValue": {"arrayValues": [{"value": v} for v in sorted(val)]}})
         else:
             cond = f"REGEXP_CONTAINS({name_col}, @re_{i})"
             params.append({"name": f"re_{i}", "parameterType": {"type": "STRING"},
@@ -614,22 +633,196 @@ class BigQuery:
         return self.query(sql, params)
 
 
-def google_brand_specs(brands: dict[str, re.Pattern], allow: dict, deny: dict) -> list[tuple]:
+def google_brand_specs(brands: dict[str, re.Pattern], allow: dict, deny: dict,
+                       domain_cr: dict[str, set[str]] | None = None) -> list[tuple]:
+    """domain_cr：登记了域名的品牌 → 本轮素材 id 集合（含检索失败时的兜底清单）。
+    登记了域名的品牌与白名单同理，不再按品牌名检索；账户白名单仍然并用。"""
+    domain_cr = domain_cr or {}
     specs = []
     for brand, brand_re in brands.items():
         ids = allow.get((GOOGLE_SOURCE, brand))
         blocked = deny.get((GOOGLE_SOURCE, brand), set())
         if ids:
             specs.append((brand, "ids", ids))
-        elif OPT_OUT not in blocked:
+        if brand in domain_cr:
+            if domain_cr[brand]:
+                specs.append((brand, "creatives", domain_cr[brand]))
+        elif not ids and OPT_OUT not in blocked:
             specs.append((brand, "regex", brand_re.pattern, blocked - {OPT_OUT}))
     return specs
+
+
+# ---------------------------------------------------------------------------
+# 按落地页域名归属（021）：透明度中心域名检索 → 素材 id
+# ---------------------------------------------------------------------------
+# 透明度中心网页（adstransparency.google.com）自己用的检索接口，**非官方、无文档**。
+# 只拿「哪些素材点进去是这个域名」这一个事实，数字仍全部取自官方 BigQuery 数据集。
+# 请求量极小（每域名每轮 1–3 页），逐页间隔 TC_PAGE_PAUSE 秒。Google 改版会让它失效：
+# 解析不了就抛 DomainLookupFailed，上游退回已知素材清单并告警，绝不因此删数据。
+TC_SEARCH_URL = "https://adstransparency.google.com/anji/_/rpc/SearchService/SearchCreatives"
+TC_PAGE_SIZE = 40
+TC_MAX_PAGES = 50           # 2000 条素材封顶；真撞到说明域名登记错了（登记成了大平台域名）
+TC_PAGE_PAUSE = 1.0
+# 透明度中心的地区码 = 2000 + ISO 3166-1 数字码。数据集只覆盖 EEA，只列 EEA。
+TC_REGION_ISO_NUM = {
+    "AT": 40, "BE": 56, "BG": 100, "HR": 191, "CY": 196, "CZ": 203, "DK": 208, "EE": 233,
+    "FI": 246, "FR": 250, "DE": 276, "GR": 300, "HU": 348, "IS": 352, "IE": 372, "IT": 380,
+    "LV": 428, "LI": 438, "LT": 440, "LU": 442, "MT": 470, "NL": 528, "NO": 578, "PL": 616,
+    "PT": 620, "RO": 642, "SK": 703, "SI": 705, "ES": 724, "SE": 752,
+}
+
+
+class DomainLookupFailed(RuntimeError):
+    """透明度中心域名检索拿不到可信结果（HTTP 错、结构变了、条数对不上）。"""
+
+
+def domain_config() -> dict[str, list[str]]:
+    """core.ci_ad_domain → 品牌 → [域名]（只取 active）。"""
+    out: dict[str, list[str]] = {}
+    with _pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT brand, domain FROM core.ci_ad_domain WHERE active ORDER BY 1, 2")
+            for brand, domain in cur.fetchall():
+                out.setdefault(brand, []).append(domain)
+    return out
+
+
+def tc_request(domain: str, region: str, page_token: str | None = None) -> dict:
+    """SearchCreatives 的 f.req 负载：按域名、按地区，一页 TC_PAGE_SIZE 条。"""
+    if region not in TC_REGION_ISO_NUM:
+        raise DomainLookupFailed(f"地区 {region} 不在 EEA 列表里，透明度中心检索不支持")
+    code = 2000 + TC_REGION_ISO_NUM[region]
+    req = {"2": TC_PAGE_SIZE, "3": {"8": [code], "12": {"1": domain, "2": True}},
+           "7": {"1": 1, "2": 0, "3": code}}
+    if page_token:
+        req["4"] = page_token
+    return req
+
+
+def parse_tc_page(j) -> tuple[dict[str, str], str | None, int | None]:
+    """一页响应 → ({creative_id: advertiser_id}, 下一页 token, 报告的总条数)。
+
+    字段是 protobuf 数字键：顶层 1=素材列表、2=下一页 token、4=总条数；
+    素材里 1=广告主 id(AR…)、2=素材 id(CR…)。形状不对就抛，不猜。
+    """
+    if not isinstance(j, dict):
+        raise DomainLookupFailed(f"响应不是 JSON 对象: {str(j)[:200]}")
+    items = j.get("1") or []
+    if not isinstance(items, list):
+        raise DomainLookupFailed("响应字段 1 不是列表 —— 接口结构变了")
+    out: dict[str, str] = {}
+    for it in items:
+        adv = it.get("1") if isinstance(it, dict) else None
+        cid = it.get("2") if isinstance(it, dict) else None
+        if not (isinstance(adv, str) and adv.startswith("AR")
+                and isinstance(cid, str) and cid.startswith("CR")):
+            raise DomainLookupFailed(f"素材条目结构变了: {str(it)[:200]}")
+        out[cid] = adv
+    total = j.get("4")
+    try:
+        total = int(total) if total not in (None, "") else None
+    except (TypeError, ValueError):
+        total = None
+    token = j.get("2") if isinstance(j.get("2"), str) and j.get("2") else None
+    return out, token, total
+
+
+def tc_domain_creatives(domain: str, region: str, *, post=None) -> dict[str, str]:
+    """按域名翻完所有页 → {creative_id: advertiser_id}。post 可注入，便于测试。"""
+    import time
+    if post is None:
+        import httpx
+
+        def post(req: dict) -> dict:
+            r = httpx.post(TC_SEARCH_URL, params={"authuser": ""},
+                           data={"f.req": json.dumps(req, separators=(",", ":"))},
+                           headers={"User-Agent": "Mozilla/5.0 (compatible; ChannelHub-CI)"},
+                           timeout=30)
+            if r.status_code >= 400:
+                raise DomainLookupFailed(f"HTTP {r.status_code}: {r.text[:200]}")
+            try:
+                return r.json()
+            except ValueError:
+                raise DomainLookupFailed(f"响应不是 JSON: {r.text[:200]}") from None
+    found: dict[str, str] = {}
+    token, total = None, None
+    for page in range(TC_MAX_PAGES):
+        if page:
+            time.sleep(TC_PAGE_PAUSE)
+        items, token, t = parse_tc_page(post(tc_request(domain, region, token)))
+        total = t if t is not None else total
+        found.update(items)
+        if not token:
+            break
+    else:
+        raise DomainLookupFailed(f"{domain} 翻了 {TC_MAX_PAGES} 页还没完 —— 域名是否登记成了大平台？")
+    # 改版最可能的样子是「照样 200，但字段全没了」：既没素材也没总数，不能当成 0 条广告
+    if not found and total is None:
+        raise DomainLookupFailed(f"{domain} 响应里既没有素材也没有总数 —— 接口结构可能变了")
+    # 报告的总数对不上 → 结果不完整，按失败处理（宁可沿用旧清单，也不拿半份清单去删数据）
+    if total is not None and total != len(found):
+        raise DomainLookupFailed(f"{domain} 报告 {total} 条素材，实际取到 {len(found)} 条")
+    return found
+
+
+def known_creatives(source_code: str, brand: str) -> set[str]:
+    """raw.ci_ad 里该品牌已有的素材 id —— 域名检索失败时的兜底清单。"""
+    with _pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ad_id FROM raw.ci_ad WHERE source_code = %s AND brand = %s",
+                        (source_code, brand))
+            return {r[0] for r in cur.fetchall()}
+
+
+def resolve_domain_creatives(domains: dict[str, list[str]], region: str, logger, *,
+                             lookup=tc_domain_creatives, known=known_creatives
+                             ) -> tuple[dict[str, set[str]], dict[str, set[str]], list[str]]:
+    """品牌 → 素材 id。返回 (用于查询的清单, 可据此清理旧行的清单, 失败说明)。
+
+    某品牌任一域名检索失败 → 该品牌退回「已知素材 ∪ 本轮成功域名的素材」继续刷新，
+    但不进第二个返回值（不据此删行）。
+    全部域名都「成功」却一条素材都没有、而库里原本有 → 同样按失败处理：透明度中心保留
+    历史广告，域名的素材从几十条掉到 0 几乎只可能是接口出了问题，不能据此清空该品牌。
+    """
+    use: dict[str, set[str]] = {}
+    prunable: dict[str, set[str]] = {}
+    failures: list[str] = []
+    for brand, doms in domains.items():
+        cids: set[str] = set()
+        ok = True
+        for d in doms:
+            try:
+                got = lookup(d, region)
+                logger.info("Google: 域名 %s → %d 条素材（%s）", d, len(got),
+                            ", ".join(sorted(set(got.values()))) or "无")
+                cids |= set(got)
+            except DomainLookupFailed as e:
+                ok = False
+                failures.append(f"{brand} / {d}: {e}")
+                logger.warning("Google: 域名 %s 检索失败: %s", d, e)
+        fallback = None
+        if ok and not cids:
+            fallback = known(GOOGLE_SOURCE, brand)
+            if fallback:
+                ok = False
+                failures.append(f"{brand} / {', '.join(doms)}: 域名检索返回 0 条素材，"
+                                f"但库里已有 {len(fallback)} 条 —— 疑似接口改版")
+                logger.warning("Google: %s 域名检索返回 0 条但库里已有 %d 条", brand, len(fallback))
+        if ok:
+            prunable[brand] = cids
+        else:
+            fallback = fallback if fallback is not None else known(GOOGLE_SOURCE, brand)
+            logger.warning("Google: %s 退回已知素材清单（%d 条）", brand, len(fallback))
+            cids |= fallback
+        use[brand] = cids
+    return use, prunable, failures
 
 
 @task(retries=1, retry_delay_seconds=120)
 def collect_google_ads(run_id: str) -> dict:
     logger = _log()
     stats = {"ads": 0, "schema_changed": 0, "cost_guard": 0, "gb_estimated": 0.0}
+    region = _region()
     if not _env("GOOGLE_ADS_BQ_SA_JSON_B64"):
         logger.info("Google: 未配置 GOOGLE_ADS_BQ_SA_JSON_B64，跳过")
         return stats
@@ -648,10 +841,16 @@ def collect_google_ads(run_id: str) -> dict:
     products = load_products()
     brands = brand_targets(products)
     allow, deny = advertiser_config()
-    specs = google_brand_specs(brands, allow, deny)
+    domains = {b: d for b, d in domain_config().items() if b in brands}
+    domain_cr, prunable, failures = resolve_domain_creatives(domains, region, logger)
+    stats["domain_creatives"] = sum(len(v) for v in domain_cr.values())
+    if failures:
+        stats["domain_lookup_failed"] = 1
+        stats["domain_detail"] = "\n".join(failures)
+    specs = google_brand_specs(brands, allow, deny, domain_cr)
     if not specs:
-        logger.info("Google: 所有品牌都禁用了按名检索且无白名单 id，跳过查询")
-        stats["pruned"] = _prune(GOOGLE_SOURCE, brands, allow, deny)
+        logger.info("Google: 所有品牌都禁用了按名检索且无白名单 id / 域名素材，跳过查询")
+        stats["pruned"] = _prune(GOOGLE_SOURCE, brands, allow, deny, prunable)
         return stats
     sql, params = build_google_sql(cols, schema, specs)
     try:
@@ -663,10 +862,9 @@ def collect_google_ads(run_id: str) -> dict:
         return stats
     finally:
         stats["gb_estimated"] = round(bq.last_estimate / 1e9, 1)
-    region = _region()
     rows = [google_row(r, run_id, region) for r in recs if r.get("brand") and r.get("creative_id")]
     stats["ads"] = _write_ads(rows)
-    stats["pruned"] = _prune(GOOGLE_SOURCE, brands, allow, deny)
+    stats["pruned"] = _prune(GOOGLE_SOURCE, brands, allow, deny, prunable)
     return stats
 
 
@@ -701,6 +899,11 @@ def ci_ads() -> dict:
                 maybe_alert(name, "schema_changed", st.get("detail", ""), logger)
             if st.get("cost_guard"):
                 maybe_alert(name, "cost_guard", st.get("detail", ""), logger)
+            if st.get("domain_lookup_failed"):
+                maybe_alert(name, "domain_lookup_failed",
+                            "透明度中心按域名检索失败，本轮沿用已知素材清单（新上的广告没进来）。\n"
+                            "多半是网页接口改版，见 flows/ci_ads.py parse_tc_page。\n\n"
+                            + st.get("domain_detail", ""), logger)
         except Exception as e:
             total["failed"] += 1
             logger.warning("%s 失败: %s", name, e, exc_info=True)
