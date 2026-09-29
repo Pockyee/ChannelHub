@@ -1,8 +1,38 @@
-# ChannelHub — 进销存数据平台（本地开发）
+# ChannelHub — 进销存与竞品情报数据平台
 
-本地开发阶段可运行的进销存数据平台基础设施。当前为**基础设施轮次**：只搭好
-数据库、对象存储与配套工具的编排，**暂不含业务表 DDL**。后续轮次再做表结构、
-Python 邮件 ETL、Prefect flow 与 Superset 报表。
+现状：进销存与竞品情报两条数据线均已跑通——迁移、ETL、Prefect flow 与 Superset 看板齐备，`docker compose up -d` + `bash scripts/initialize.sh` 即可拉起。
+
+## Overview
+
+ChannelHub is a self-hosted data platform for channel sales (sell-through / inventory)
+and competitive intelligence. Supplier report emails are archived to MinIO, parsed into
+Postgres, and modelled through three schemas — `raw` (as-received), `core` (cleaned,
+deduplicated, conformed dimensions) and `mart` (reporting views) — which Superset reads
+for dashboards. The competitive-intelligence line (prices, reviews, social, media, ads,
+search demand) follows the same path: every web page, API response or ad-library pull is
+archived to MinIO first, then loaded into `raw.ci_*` and surfaced via `mart.v_ci_*`.
+All jobs are Prefect 3 flows; everything runs from one `docker-compose.yml`.
+
+```mermaid
+flowchart LR
+    subgraph Sources
+        E[Supplier emails<br/>IMAP]
+        W[Web pages / APIs<br/>prices · reviews · media · demand]
+        A[Ad libraries<br/>Meta · Google Ads Transparency]
+    end
+
+    E -- email-backup --> M1[(MinIO<br/>email-archive)]
+    W -- ci-* flows --> M2[(MinIO<br/>ci-archive)]
+    A -- ci-ads --> M2
+
+    M1 -- parse-sell-through --> R[raw<br/>sell_through_* · ci_*]
+    M2 --> R
+    R --> C[core<br/>dedup · dims · ci_product]
+    C --> MT[mart<br/>v_* / v_ci_*]
+    MT --> S[Superset]
+```
+
+Edge labels are Prefect deployment names (see `prefect.yaml`).
 
 ## 服务一览
 
@@ -10,7 +40,7 @@ Python 邮件 ETL、Prefect flow 与 Superset 报表。
 |---|---|---|---|
 | PostgreSQL | `postgres:16` | `127.0.0.1:5432`(仅本机) | 主业务库 `channelhub` + `prefect` / `superset` 支撑库(同一实例) |
 | pgAdmin | `dpage/pgadmin4:latest` | `127.0.0.1:5050`(仅本机) | 数据库可视化管理(已预注册服务器 ChannelHub-PG) |
-| MinIO | `minio/minio:latest` | `127.0.0.1:9000/9001`(仅本机) | 邮件源文件备份对象存储,桶 `email-archive` |
+| MinIO | `minio/minio:latest` | `127.0.0.1:9000/9001`(仅本机) | 源文件原样存档:桶 `email-archive`(邮件)、`ci-archive`(竞品情报抓取,flow 首次写入时自动建) |
 | **Superset** | `apache/superset:4.1.1` | **`https://<PREFECT_PROXY_HOST>`(公网,主 BI)** | 主对外 BI 报表 — Caddy 反代 + 自签 HTTPS |
 | Prefect 3 OSS | `prefecthq/prefect:3-latest` | `127.0.0.1:4200`(仅本机) | 任务编排 server;走 SSH 隧道访问(OSS 无认证不可公网暴露) |
 | Caddy | `caddy:2` | `0.0.0.0:443` | HTTPS 反代到 Superset;证书 SAN 写 `PREFECT_PROXY_HOST` |
@@ -31,10 +61,8 @@ Python 邮件 ETL、Prefect flow 与 Superset 报表。
 ## 前置条件
 
 - 已安装 **Docker Engine + Docker Compose 插件**（`docker compose version` 可用）。
-  > 本机当前未安装 Docker，需先安装：参见
-  > https://docs.docker.com/engine/install/ ，并将当前用户加入 `docker` 组。
-- 端口 `5432 / 5050 / 9000 / 9001 / 3000 / 4200 / 443 / 51820(udp) / 51821` 未被占用（如冲突见下文「故障排查」）。
-  > 443 给 Caddy（Prefect HTTPS 反代）；若被占用改 `.env` 的 `PREFECT_HTTPS_PORT`。
+- 端口 `5432 / 5050 / 9000 / 9001 / 4200 / 443 / 51820(udp) / 51821` 未被占用（冲突时改 `docker-compose.yml` 里对应的宿主机端口）。
+  > 443 给 Caddy（Superset HTTPS 反代）；若被占用改 `.env` 的 `PREFECT_HTTPS_PORT`。
 
 ## 快速开始
 
@@ -68,5 +96,7 @@ BI 只读角色 `bi_readonly`、GTIN 白名单 seed、Superset 数据源 + 仪�
 2. 用 `.env` 里 `BI_READONLY_PASSWORD` 设 `bi_readonly` 角色密码
 3. 装载 `db/seed/gtin_whitelist.csv` 到 `core.gtin_whitelist`
 4. 在 Postgres 建空的 `superset` 元数据库(若不存在);superset-init 容器会在里面建 schema
-6. 调 `scripts/superset_setup.py` — Superset 用 admin 凭据注册 ChannelHub 数据源
+5. 调 `scripts/superset_setup.py` — Superset 用 admin 凭据注册 ChannelHub 数据源
+6. 调 `scripts/superset_provision.sh` — 应用 BI 口径视图并重建全部 Superset 看板
+   (与 deploy 调的是同一个脚本,push 后 deploy 会自动重放)
 

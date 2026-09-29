@@ -6,8 +6,8 @@
 #   2) 设 bi_readonly 角色密码(取自 .env)
 #   3) 装载 db/seed/gtin_whitelist.csv                          → core.gtin_whitelist
 #   4) 在 Postgres 建空的 superset 元数据库(若不存在)
-#   6) Superset 注册 ChannelHub 数据源                          — 主对外 BI
-#   7) 应用 007 PSI 口径视图 mart.v_psi + 建 Expert PSI 看板    — 主对外 BI
+#   5) Superset 注册 ChannelHub 数据源                          — 主对外 BI
+#   6) scripts/superset_provision.sh:BI 口径视图 + 全部看板       — 主对外 BI
 #
 # 前置:
 #   - docker compose up -d 已跑过,postgres/superset/superset-init 都健康
@@ -111,13 +111,13 @@ else
 fi
 
 
-echo "==> 6/7 Superset 注册 ChannelHub 数据源 — 主对外 BI(443)"
+echo "==> 5/6 Superset 注册 ChannelHub 数据源 — 主对外 BI(443)"
 docker run --rm --network "$NET" \
   --env-file .env \
   -v "$REPO_ROOT/scripts/superset_setup.py:/ss.py:ro" \
   prefecthq/prefect:3-latest python /ss.py
 
-echo "==> 7/7 Superset BI 供给(口径视图 + 看板,幂等)"
+echo "==> 6/6 Superset BI 供给(口径视图 + 看板,幂等)"
 # 单一事实源:与 deploy.yml 调的是同一个脚本(应用 BI 视图 + 确保 admin/数据源 +
 # 重跑所有 superset_*_dashboard.py)。本地改看板代码 push 后,deploy 会自动重放。
 bash scripts/superset_provision.sh
