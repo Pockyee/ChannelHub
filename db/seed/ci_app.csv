@@ -1,0 +1,7 @@
+store,app_id,brand,line,app_name,active,notes
+google_play,com.imoo.watch.global,imoo,imoo,imoo Watch Phone,true,"imoo 官方唯一的手表 App(欧盟官网也只链这个)。安装量是全球口径,imoo 在亚洲体量大,跟 Xplora 比安装量要打折看;德国维度看德语评论"
+app_store,1057845227,imoo,imoo,imoo Watch Phone,true,bundle com.okii.callwatch.i;评分数为德国区
+google_play,com.xplora.xplorav2,Xplora,imoo,Xplora (Guardian),true,"2025 年前后重新上架的新版 App(旧版已下架),安装量/评论只从新版起算;上架初期有老用户迁移带来的评论高峰"
+app_store,6740086849,Xplora,imoo,Xplora (Guardian),true,bundle com.xplora.appV2;评分数为德国区
+google_play,com.trackerandroid.trackerandroid,TCL,imoo,TCL Connect,false,"MT48 用的 App,但同时管 TCL 路由器等设备,安装量不代表手表;暂不采"
+app_store,1456360744,TCL,imoo,TCL Connect,false,同上

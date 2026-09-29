@@ -49,6 +49,26 @@ echo "--- 产品同步(removed / upserted / total)---"
 echo "--- alias 同步(removed / upserted / total)---"
 "${PSQL[@]}" -c "SELECT * FROM core.sync_ci_product_alias();"
 
+# --- 2b) 需求层配置(022):搜索词 + 配套 App ------------------------------------
+# 纯配置表、没有 flow 自动写入的行，直接整表替换;一个事务内完成，flow 不会读到空表。
+# 迁移 022 还没应用时跳过(老库先跑 superset_provision.sh)。
+replace_table() {   # $1=表 $2=列清单 $3=CSV
+  { echo "BEGIN; DELETE FROM $1;"
+    echo "COPY $1 ($2) FROM STDIN WITH (FORMAT csv, HEADER true);"
+    cat "$3"; echo '\.'
+    echo "COMMIT;"; } | "${PSQL[@]}" -q
+  echo "  $1 ← $(basename "$3"): $("${PSQL[@]}" -tAc "SELECT count(*) FROM $1") 行"
+}
+if [[ "$("${PSQL[@]}" -tAc "SELECT to_regclass('core.ci_app') IS NOT NULL")" == "t" ]]; then
+  echo "--- 需求层配置 ---"
+  [[ -f "$SCRIPT_DIR/ci_trend_term.csv" ]] && replace_table core.ci_trend_term \
+    "line,term,brand,sort_order,active,notes" "$SCRIPT_DIR/ci_trend_term.csv"
+  [[ -f "$SCRIPT_DIR/ci_app.csv" ]] && replace_table core.ci_app \
+    "store,app_id,brand,line,app_name,active,notes" "$SCRIPT_DIR/ci_app.csv"
+else
+  echo "(跳过需求层配置:core.ci_app 不存在，先应用 db/migrations/022_ci_demand.sql)"
+fi
+
 # --- 3) 缺口清单:哪些「产品 × 关键源」还没填标识 ------------------------------
 # 只列**靠稳定 id 直接取数**的源。eBay 与 mydealz 走关键词搜索(结果再逐条复核型号)，
 # 不需要 alias，列进来只会制造永远清不掉的假缺口。系列兜底行(kind='series')只给媒体层用，同理不列。

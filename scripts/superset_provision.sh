@@ -49,6 +49,8 @@ IDEMPOTENT_MIGRATIONS=(
   db/migrations/019_ci_ads.sql
   db/migrations/020_ci_ad_daily.sql
   db/migrations/021_ci_ad_domain.sql
+  # 需求层(Google Trends + App 商店):依赖 012/019(layer 约束写法)
+  db/migrations/022_ci_demand.sql
 )
 
 # 幂等可重放的 BI 参照 seed(CSV 即权威,loader 内 TRUNCATE+\copy+sync)。

@@ -88,7 +88,7 @@ IMOO = [p for p in ALL_MODELS if LINE_OF[p.product_id] == "imoo"]
 print("1) seed CSV 完整性")
 check(len(PRODUCTS) == 6, f"hutt 线 6 款产品(读到 {len(PRODUCTS)})")
 check(sum(1 for p in PRODUCTS if p.is_own) == 1, "hutt 线恰好一款 is_own")
-check(len(IMOO) == 6, f"imoo 线 6 款产品(读到 {len(IMOO)})")
+check(len(IMOO) == 7, f"imoo 线 7 款产品(含 TCL MT48)(读到 {len(IMOO)})")
 check({p.product_id for p in IMOO if p.is_own} == {"imoo-z1", "imoo-z3", "imoo-z7", "imoo-x10"},
       "imoo 线自家为 Z1/Z3/Z7/X10")
 check(set(LINE_OF.values()) == {"hutt", "imoo"}, f"line 只取 hutt / imoo(读到 {set(LINE_OF.values())})")
@@ -98,7 +98,9 @@ for p in ALL_ROWS:
 check(all(len(v) == 1 for v in _brand_lines.values()),
       "每个品牌只属于一条线(广告按品牌归线,见 019)", f"{_brand_lines}")
 check(all(p.brand_re and p.model_re for p in PRODUCTS), "每款都有 brand_regex 与 match_regex")
-check(all(p.kind in ("model", "series") for p in ALL_ROWS), "kind 只取 model / series")
+check(all(p.kind in ("model", "series", "listing") for p in ALL_ROWS), "kind 只取 model / series / listing")
+check(all(not (p.brand_re or p.model_re) for p in ALL_ROWS if p.kind == "listing"),
+      "listing 行不填正则(只按 ASIN 取 Amazon,不参与型号消歧,见 022)")
 check([s.product_id for s in SERIES] == ["ecovacs-winbot"], f"系列兜底行(读到 {[s.product_id for s in SERIES]})")
 
 # ---------------------------------------------------------------------------

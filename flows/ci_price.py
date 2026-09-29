@@ -239,8 +239,15 @@ def parse_geizhals(html: str) -> dict:
 # ===========================================================================
 # Amazon 专用解析：BSR 是全项目唯一的销量信号
 # ===========================================================================
-_AMZ_PRICE_RE = re.compile(r'class="a-offscreen">\s*([0-9.,]+)\s*&euro;|class="a-offscreen">\s*&euro;?\s*([0-9.,]+)')
+# 价格：先取页面内嵌的 "priceAmount": 299.00(只出现一次，就是主商品的到手价)，
+# 再退回 a-offscreen。2026-09 起 a-offscreen 里是字面的「€」而不是 &euro;，两种都认。
+_AMZ_PRICE_JSON_RE = re.compile(r'"priceAmount":\s*([0-9]+(?:\.[0-9]+)?)')
+_AMZ_PRICE_RE = re.compile(r'class="a-offscreen">\s*([0-9.,]+)\s*(?:&euro;|€)'
+                           r'|class="a-offscreen">\s*(?:&euro;|€)\s*([0-9.,]+)')
 _AMZ_TITLE_RE = re.compile(r'id="productTitle"[^>]*>(.*?)<', re.DOTALL)
+# 评分：只认商品本身的 acrPopover。页面上还有保险/推荐位的「x,x von 5 Sternen」
+# (实测排在前面)，裸搜第一个会拿到别的东西的星级 —— 2026-09 X10 因此被记成 1,0。
+_AMZ_RATING_POPOVER_RE = re.compile(r'id="acrPopover"[^>]*title="([0-9],[0-9])\s*von\s*5', re.IGNORECASE)
 _AMZ_RATING_RE = re.compile(r'([0-9],[0-9])\s*von\s*5\s*Sternen', re.IGNORECASE)
 _AMZ_REVIEWS_RE = re.compile(r'([\d.,]+)\s*(?:Sternebewertungen|Bewertungen|Rezensionen)', re.IGNORECASE)
 # 「Amazon Bestseller-Rang: Nr. 1.234 in Baumarkt」
@@ -261,12 +268,16 @@ def parse_amazon(html: str) -> dict:
         title = re.sub(r"\s+", " ", m.group(1)).strip()
 
     price_cents = None
-    m = _AMZ_PRICE_RE.search(html)
+    m = _AMZ_PRICE_JSON_RE.search(html)
     if m:
-        price_cents = _eur_to_cents(m.group(1) or m.group(2))
+        price_cents = int(round(float(m.group(1)) * 100)) or None
+    if price_cents is None:
+        m = _AMZ_PRICE_RE.search(html)
+        if m:
+            price_cents = _eur_to_cents(m.group(1) or m.group(2))
 
     rating = None
-    m = _AMZ_RATING_RE.search(html)
+    m = _AMZ_RATING_POPOVER_RE.search(html) or _AMZ_RATING_RE.search(html)
     if m:
         rating = float(m.group(1).replace(",", "."))
 

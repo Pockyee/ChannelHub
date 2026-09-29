@@ -101,3 +101,15 @@ deployments:
       - cron: "{{ $CI_ADS_CRON }}"
         timezone: "UTC"
         active: true
+
+  - name: ci-demand
+    entrypoint: flows/ci_demand.py:ci_demand
+    description: "竞品情报-需求层：Google Trends 搜索热度 + Google Play / App Store 商店指标 → raw.ci_search_trend + ci_app_stat"
+    work_pool:
+      name: channelhub-pool
+    # 日频 05:45 UTC(排在 ci-social 之后，避开同一时段的抓取)。App 评分数/安装量要日粒度
+    # 才看得出增速;Trends 是周序列，flow 内按 CI_TRENDS_MIN_DAYS 节流，实际约每周取一次。
+    schedules:
+      - cron: "{{ $CI_DEMAND_CRON }}"
+        timezone: "UTC"
+        active: true

@@ -9,8 +9,9 @@ DASHBOARDS 里加一项(图名前缀必须不同 —— 本脚本按图名认领
   · scripts/superset_setup.py 已跑过(存在数据源 "ChannelHub")
 
 做四件事(全部幂等:存在则更新,不存在则创建):
-  1) 注册 5 个数据集:v_ci_compare(主) / v_ci_share_of_voice / v_ci_mention_detail /
-     v_ci_ad_detail(广告层,019) / v_ci_ad_daily(广告展示按日摊分,020)
+  1) 注册 7 个数据集:v_ci_compare(主) / v_ci_share_of_voice / v_ci_mention_detail /
+     v_ci_ad_detail(广告层,019) / v_ci_ad_daily(广告展示按日摊分,020) /
+     v_ci_search_trend + v_ci_app_daily(需求层,022)
   2) 每个看板建 5 张图(图名带线前缀,如「HUTT CI · Mentions」),每张独占一行:
        A Price Trend by Model      折线时序,按产品分组;只画有报价的日子,
                                    横轴按实际数据起止拉伸(视图里的纯提及日
@@ -21,6 +22,12 @@ DASHBOARDS 里加一项(图名前缀必须不同 —— 本脚本按图名认领
        D Ad Impressions (est.)     折线     —— 每个时间段的广告展示次数(估算),按品牌分色;
                                               周期由 Impressions period 过滤器切 日/周/月
        E Ads                       表格     —— Meta + Google 广告明细,可点开原广告
+     DASHBOARDS 里带 "demand": True 的看板(目前只有 imoo)再加需求层 5 张图,不挂时间过滤器:
+       F Search Interest (Google Trends)  折线 —— 品牌词/品类词 5 年周序列
+       G Amazon Bestseller Rank           折线 —— 倒置 y 轴,越低越好
+       H Amazon Ratings                   折线 —— 累计评分数(增速 ≈ 销量代理)
+       I App Ratings                      折线 —— 配套 App 评分数(≈ 装机量)
+       J App Installs (Google Play)       折线 —— 精确安装数(全球口径)
      (图表名与指标标签一律英文:看板是给人看的对外产物,注释保持中文)
   3) 组装成看板,带五个原生过滤器:
        · Price window  —— 只作用于 A 图的时间区间,相对今天倒推,默认最近 30 天(含今天)
@@ -66,7 +73,7 @@ DASHBOARDS = [
     {"line": "hutt", "slug": "competitive-intel", "title": "HUTT Competitive Intelligence",
      "chart_prefix": "HUTT CI", "filter_prefix": "NATIVE_FILTER-ci"},
     {"line": "imoo", "slug": "imoo-competitive-intel", "title": "imoo Competitive Intelligence",
-     "chart_prefix": "imoo CI", "filter_prefix": "NATIVE_FILTER-imoo-ci"},
+     "chart_prefix": "imoo CI", "filter_prefix": "NATIVE_FILTER-imoo-ci", "demand": True},
 ]
 
 DATASETS = {                      # 表名 → 主时间列
@@ -75,6 +82,8 @@ DATASETS = {                      # 表名 → 主时间列
     "v_ci_mention_detail": "published_at",
     "v_ci_ad_detail": "first_shown",          # 广告层(019)
     "v_ci_ad_daily": "ad_day",                # 广告展示按日摊分(020)
+    "v_ci_search_trend": "trend_week",        # 需求层:Google Trends(022)
+    "v_ci_app_daily": "observed_on",          # 需求层:App 商店指标(022)
 }
 
 
@@ -124,6 +133,11 @@ def m(col, label, agg="SUM", opt=None):
 BEST_PRICE = m("best_total_eur", "Best Price (€)", agg="MIN", opt="metric_best_price")
 MENTION_CNT = m("mention_cnt", "Mentions", agg="SUM", opt="metric_mention_cnt")
 AD_IMPR = m("impressions_est", "Impressions (est.)", agg="SUM", opt="metric_ad_impr")
+SEARCH_IDX = m("value", "Search interest (0–100)", agg="MAX", opt="metric_search_idx")
+AMZ_BSR = m("amazon_bsr", "Amazon BSR (lower = better)", agg="MIN", opt="metric_amz_bsr")
+AMZ_RATINGS = m("amazon_review_count", "Amazon ratings", agg="MAX", opt="metric_amz_ratings")
+APP_RATINGS = m("rating_count", "App ratings", agg="MAX", opt="metric_app_ratings")
+APP_INSTALLS = m("installs_exact", "Installs (worldwide)", agg="MAX", opt="metric_app_installs")
 
 
 def flt(subject, op, comparator, name):
@@ -134,6 +148,30 @@ def flt(subject, op, comparator, name):
 
 
 HAS_PRICE = flt("best_total_eur", "IS NOT NULL", None, "filter_has_price")
+HAS_BSR = flt("amazon_bsr", "IS NOT NULL", None, "filter_has_bsr")
+HAS_AMZ_RATINGS = flt("amazon_review_count", "IS NOT NULL", None, "filter_has_amz_ratings")
+ON_PLAY = flt("store", "==", "google_play", "filter_store_play")
+
+# 需求层(022)图表的说明文字,挂在图表的 description 上(看板里悬停标题可见)
+CHART_NOTES = {
+    "Search Interest (Google Trends)":
+        "Google Trends, Germany, weekly, last 5 years. 100 = the highest week of any term in "
+        "this one request; values are only comparable within this chart.",
+    "Amazon Bestseller Rank":
+        "Amazon.de bestseller rank in Elektronik & Foto (lower = better). Rank is per parent "
+        "listing: imoo Z1/Z3/Z7/X10 share one parent, so they show the same rank; imoo has a "
+        "second parent listing ('Amazon listing 2') with its own rank. 'Xplora X6Play (Telekom "
+        "eSIM)' is the carrier version on Amazon.",
+    "Amazon Ratings":
+        "Cumulative star ratings on the tracked amazon.de listing. Growth over time is a "
+        "sales proxy.",
+    "App Ratings":
+        "Cumulative ratings of the companion app. App Store = Germany only; Google Play = "
+        "worldwide. The watch needs the app, so this approximates the installed base.",
+    "App Installs (Google Play)":
+        "Exact install count embedded in the Play Store page, worldwide (not Germany only). "
+        "imoo is large in Asia, so compare trends rather than levels.",
+}
 
 
 def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
@@ -166,7 +204,7 @@ def query_context(ds_id, form_data, *, columns, metrics, is_timeseries=False,
 # ---------------------------------------------------------------------------
 # 图定义:返回 [(名称, viz_type, form_data, query_context), ...]
 # ---------------------------------------------------------------------------
-def chart_defs(ids, line, prefix):
+def chart_defs(ids, line, prefix, demand=False):
     line_f = flt("line", "==", line, "filter_line")
     cmp_id = ids["v_ci_compare"]
     sov_id = ids["v_ci_share_of_voice"]
@@ -234,10 +272,24 @@ def chart_defs(ids, line, prefix):
           # 时间窗口按 last_shown 截:窗口内「还在展示」的广告都列出,
           # 包括窗口开始前就开投的长期广告(按 first_shown 截会把它们漏掉)
           "first_shown", "last_shown")
+
+    # 需求层(022):搜索热度 / Amazon 排名与评分数 / App 评分数与安装量。
+    # 不挂任何时间过滤器(看全历史):Trends 一次就给 5 年,App/Amazon 从 2026-09 起逐日累积。
+    if demand:
+        ts("Search Interest (Google Trends)", ids["v_ci_search_trend"], "trend_week",
+           SEARCH_IDX, [line_f], fmt="SMART_NUMBER", groupby="term")
+        ts("Amazon Bestseller Rank", cmp_id, "observed_on", AMZ_BSR, [line_f, HAS_BSR],
+           invert=True, fmt="SMART_NUMBER")
+        ts("Amazon Ratings", cmp_id, "observed_on", AMZ_RATINGS, [line_f, HAS_AMZ_RATINGS],
+           fmt="SMART_NUMBER")
+        ts("App Ratings", ids["v_ci_app_daily"], "observed_on", APP_RATINGS, [line_f],
+           fmt="SMART_NUMBER", groupby="app_label")
+        ts("App Installs (Google Play)", ids["v_ci_app_daily"], "observed_on", APP_INSTALLS,
+           [line_f, ON_PLAY], fmt="SMART_NUMBER", groupby="app_label")
     return out
 
 
-# 看板布局:每行几张图 + 行高
+# 看板布局:每行几张图 + 行高(下标对应 chart_defs 的输出顺序)
 LAYOUT_ROWS = [
     {"charts": [0], "height": 60},           # 价格走势 —— 独占一行
     {"charts": [1], "height": 50},           # 声量柱状图 —— 独占一行
@@ -245,16 +297,22 @@ LAYOUT_ROWS = [
     {"charts": [3], "height": 50},           # 广告展示次数走势 —— 独占一行
     {"charts": [4], "height": 70},           # 广告明细表 —— 独占一行
 ]
+DEMAND_ROWS = [                              # 需求层(只在 demand=True 的看板)
+    {"charts": [5], "height": 55},           # 搜索热度 —— 独占一行
+    {"charts": [6, 7], "height": 50},        # Amazon 排名 | Amazon 评分数
+    {"charts": [8, 9], "height": 50},        # App 评分数 | App 安装量
+]
 
 
 def position_json(chart_ids, chart_names, title):
+    rows = LAYOUT_ROWS + (DEMAND_ROWS if len(chart_ids) > 5 else [])
     pos = {
         "DASHBOARD_VERSION_KEY": "v2",
         "ROOT_ID": {"type": "ROOT", "id": "ROOT_ID", "children": ["GRID_ID"]},
         "HEADER_ID": {"type": "HEADER", "id": "HEADER_ID", "meta": {"text": title}},
     }
     row_ids = []
-    for row_no, row in enumerate(LAYOUT_ROWS):
+    for row_no, row in enumerate(rows):
         row_id = f"ROW-{row_no}"
         row_ids.append(row_id)
         pos[row_id] = {"type": "ROW", "id": row_id, "children": [],
@@ -343,12 +401,13 @@ def build_dashboard(cfg, existing_charts, dashboards):
     print(f"--- 看板 [{title}] (line={line}) ---")
 
     chart_ids, chart_names = [], []
-    for name, viz, fd, qc in chart_defs(ds_ids, line, prefix):
+    for name, viz, fd, qc in chart_defs(ds_ids, line, prefix, demand=cfg.get("demand", False)):
         ds_id = int(fd["datasource"].split("__")[0])
         body = {"slice_name": name, "viz_type": viz,
                 "datasource_id": ds_id, "datasource_type": "table",
                 "params": json.dumps(fd, ensure_ascii=False),
-                "query_context": json.dumps(qc, ensure_ascii=False)}
+                "query_context": json.dumps(qc, ensure_ascii=False),
+                "description": CHART_NOTES.get(name.split(" · ", 1)[-1])}
         if name in existing_charts:
             cid = existing_charts[name]
             st, j = call("PUT", f"/api/v1/chart/{cid}", token=token, csrf=csrf, body=body)

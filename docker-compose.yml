@@ -305,6 +305,8 @@ services:
       CI_DIGEST_CRON: ${CI_DIGEST_CRON:-0 7 * * 1}
       # 广告层周频（周一 06:30 UTC）；BigQuery 按扫描量计费，别调成日频
       CI_ADS_CRON: ${CI_ADS_CRON:-30 6 * * 1}
+      # 需求层日频(App 商店指标);Google Trends 在 flow 内自带周频节流(CI_TRENDS_MIN_DAYS)
+      CI_DEMAND_CRON: ${CI_DEMAND_CRON:-45 5 * * *}
     volumes:
       - ./flows:/app/flows:ro
       - ./prefect.yaml:/app/prefect.yaml:ro
@@ -398,6 +400,9 @@ services:
       CI_ADS_REGION: ${CI_ADS_REGION:-DE}
       CI_ADS_LOOKBACK_DAYS: ${CI_ADS_LOOKBACK_DAYS:-365}
       CI_ADS_MAX_PAGES: ${CI_ADS_MAX_PAGES:-20}
+      # ---- 需求层（ci_demand.py）----
+      # Google Trends 距上次抓取不足这么多天就跳过(周序列无需日取，也少挨 429)
+      CI_TRENDS_MIN_DAYS: ${CI_TRENDS_MIN_DAYS:-6}
     volumes:
       - ./flows:/app/flows:ro
     depends_on:

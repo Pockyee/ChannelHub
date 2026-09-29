@@ -1,0 +1,4 @@
+line,term,brand,sort_order,active,notes
+imoo,imoo,imoo,1,true,"品牌词。2026-09 实测 5 年序列:德国区量级约为 xplora 的 1/10"
+imoo,xplora,Xplora,2,true,品牌词
+imoo,kinder smartwatch,,3,true,"品类词(brand 留空 = Category);看季节性:开学季 / 圣诞"

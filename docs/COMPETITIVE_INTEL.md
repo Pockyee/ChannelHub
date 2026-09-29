@@ -1,7 +1,7 @@
 # 竞品市场情报线（Competitive Intelligence）
 
 平台的第二条数据线。按「情报线」（`core.ci_product.line`）分组做日频情报采集，
-覆盖价格、零售口碑、用户讨论、媒体评测、广告五层，每条线在 Superset 出一个看板：
+覆盖价格、零售口碑、用户讨论、媒体评测、广告、需求六层，每条线在 Superset 出一个看板：
 
 | line | 看板（slug） | 自家 | 竞品 |
 |---|---|---|---|
@@ -66,7 +66,14 @@ sed -i 's/^CI_DRY_RUN=.*/CI_DRY_RUN=false/' .env && docker compose up -d prefect
 - **Z3 是 Geizhals 未收录的单商家页**(`geizhals.de/6823412496`,只有 imoo-online-de 一家):
   只有纯数字 id,套 `{eid}.html` 模板会 404,所以 alias 里填的是**整条 URL**(`_url_for` 对 http
   开头的 external_id 原样使用)。
-- Amazon 的 ASIN 六款都没填。Z7 蓝色的 ASIN 是 `B0CXSSLDW5`(未核对是否就是要跟踪的版本)。
+- **Amazon 七款 ASIN 已填**（2026-09-29，逐个打开商品页核对过标题、排名与评分数）。
+  imoo 四款都挂在 IMOO Direct 的同一个父商品 `B0HBWP4Z41` 下，**Amazon 排名按父商品算，
+  所以四款的 BSR 永远相同**：它是 imoo 的品牌级排名，分不出型号；评分数是按变体分开的。
+  另有第二组 imoo 父商品 `B0HDJ7RMX9`（变体名是法语 Bleu/Gris/Blanc，疑似从法国站同步的
+  泛欧 listing；2026-09-29 排名 #1.675，比 IMOO Direct 组的 #3.313 更靠前），与 Telekom eSIM 版
+  X6 Play（`B0C33QFSSL`）一样，按用户决定（2026-09-29）**都跟**，登记成 `kind='listing'` 的
+  独立产品行（`imoo-*-l2`、`xplora-x6play-telekom`），见下「listing 行」。
+  Xplora / TCL 的 ASIN 刻意避开了带 SIM 合约的捆绑款，理由与备选 ASIN 写在 alias CSV 的 alias_text 里。
 - **X6Play 有两代**：Geizhals 分成「X6 Play」（`v221128`，已登记）与「X6 Play (2. Gen)」（`v210338`）。
   型号正则 `x6 play` 两代都会命中（mydealz / eBay / 媒体层），要区分的话需要把 2. Gen 拆成单独一款。
 - **mydealz** 默认多轮询 `smartwatch` 与 `kinder`（Baby & Kind）两个分组；
@@ -111,7 +118,9 @@ sed -i 's/^CI_DRY_RUN=.*/CI_DRY_RUN=false/' .env && docker compose up -d prefect
 | 媒体层 | Google News RSS 统一发现 | ✅ 可用，实测 49 条入库 | 见下「媒体层为什么不逐家配 RSS」 |
 | **mydealz** | **公开 RSS 分组 feed** | ✅ **可用**，无需签名 | 实测扫 90 条帖 → 4 条促销价；见下 |
 | **idealo** | 抓取 | ⏸ **已停用**（`active=false`） | Akamai 403；robots 实际**允许**该路径，是反爬拦的 |
-| Amazon.de | 自建抓取 | ⏳ 待填 ASIN | **唯一的销量信号源**（BSR）。见下「Amazon 的边界」 |
+| Amazon.de | 自建抓取 | ✅ **可用**（imoo 线 7 款，2026-09-29 起） | **唯一的销量信号源**（BSR）。见下「Amazon 的边界」；hutt 线尚未填 ASIN |
+| **Google Trends** | 非官方 JSON 接口 | ✅ **可用**（2026-09-29 起） | 需求层，见下「需求层」 |
+| **Google Play / App Store** | 商店详情页 / 官方 iTunes lookup | ✅ **可用**（2026-09-29 起） | 需求层；**不采评论**（robots 禁止），见下 |
 | MediaMarkt / Saturn | 抓取（JSON-LD） | ⏳ 待填 alias | 同一 MMS 平台，一个 adapter 覆盖两站 |
 | Otto | 抓取（JSON-LD） | ⏳ 待填 alias | 官方 Market API 只给卖家自家数据，读不到竞品 |
 | **Instagram** | **官方 Hashtag Search API** | ⏳ 待过 App Review | 三条结构性限制，见下节 —— 配词前必读 |
@@ -449,6 +458,55 @@ bash db/seed/load_ci_ad_advertiser.sh
 - **Meta 文案会挂型号。** 文案过 `match_products_all()`，命中的型号进 `products` 列；
   ECOVACS 的扫地机广告也会出现（品牌级检索），没挂型号的就是非擦窗机品类。
 
+## 需求层：搜索热度 + 配套 App（`ci-demand`）
+
+价格、提及、广告都只是「可见度」。两家都没有公开销量，这一层补三个**需求 / 存量**代理，
+让「谁卖得好」有数据可看。口径细节见 `db/migrations/022_ci_demand.sql` 文件头。
+
+| 信号 | 源 | 表 | 看板图 | 能否回溯 |
+|---|---|---|---|---|
+| 品牌搜索热度 | Google Trends（DE，5 年周序列） | `raw.ci_search_trend` | Search Interest (Google Trends) | ✅ 一次就给 5 年 |
+| Amazon 排名 / 评分数 | Amazon.de 商品页（价格层采） | `raw.ci_listing_stat` | Amazon Bestseller Rank / Amazon Ratings | ❌ 从 2026-09-29 起累积 |
+| App 评分数 / 安装量 | Google Play 详情页、iTunes lookup | `raw.ci_app_stat` | App Ratings / App Installs (Google Play) | ❌ 从 2026-09-29 起累积 |
+
+**listing 行（`core.ci_product.kind='listing'`）**：同一型号在 Amazon 上有多组父商品、或有
+运营商版时，每组要单独一行才能各看各的排名与评分数（`raw.ci_listing_stat` 一个产品一天只收
+一条 Amazon 观测）。listing 行**不填正则**、只在 alias CSV 里挂 ASIN；`load_products()` 默认
+只返回 model，所以提及 / 广告 / 型号消歧都看不见它们，不会出现「同型号两行」的歧义。
+`check_ci_matching.py` 断言了 listing 行不带正则。
+
+配置两个 CSV（CSV 即权威，改完跑 `bash db/seed/load_ci_product.sh`）：
+
+- `db/seed/ci_trend_term.csv`：每条线比较哪些词。**一条线的词必须在同一次请求里（≤ 5 个）**，
+  Google Trends 的值是同一请求内的相对值（最高那一周 = 100），跨请求不可比。
+  品类词（如 `kinder smartwatch`）brand 留空，看板上归为 Category，用来看季节性。
+- `db/seed/ci_app.csv`：每个品牌的配套 App（Play 包名 / App Store 数字 id）。
+
+看数前要知道的口径：
+
+- **Trends 每次整段重取、按抓取日留快照**，视图只取最新一次；同一周在不同抓取日的值可能
+  略有不同（Google 抽样）。距上次抓取不足 `CI_TRENDS_MIN_DAYS`（默认 6）天就跳过。
+  非官方接口，首个请求常回 429，flow 会退避 60 秒重试一次；失败按 `fetch_failed` 告警。
+- **Google Play 的安装量与评分数是全球口径**。imoo 在亚洲体量大，安装量比 Xplora 高
+  不代表德国卖得好 —— 跨品牌比较看**增速**和 App Store 德国区的评分数。
+- **App Store 评分数是德国区的**（lookup 带 `country=de`），是最直接的德国装机量代理。
+  2026-09-29 首采：Xplora 38,715 vs imoo 109。
+- Xplora 的 Play App（`com.xplora.xplorav2`）是 2025 年前后重新上架的新版，数字只从新版起算。
+- TCL Connect 同时管路由器等设备，安装量不代表手表，`ci_app.csv` 里登记了但 `active=false`。
+
+**为什么不采 App 评论**：本想按月数德语评论来回溯新增用户节奏，但 Google Play 的评论接口
+（`/_/…batchexecute`、`/store/getreviews`）和 Apple 的评论 RSS（`/*/rss/*`）都在各自
+robots.txt 的 Disallow 里。robots 是本项目的硬约束（见「合规约定」），所以只取详情页与
+官方 lookup 接口，这条线索放弃。
+
+手动跑：
+
+```bash
+docker compose exec prefect-worker python flows/ci_demand.py
+# 干跑(不写库):
+docker compose exec -e CI_DRY_RUN=true prefect-worker python flows/ci_demand.py
+```
+
 ## 合规约定（写在 `flows/ci_common.py` 里，不是写在文档里就算）
 
 - **robots.txt 逐请求检查**。欧盟 DSM 第 4 条 TDM 例外依赖机器可读的 opt-out，
@@ -645,6 +703,7 @@ ORDER BY digest_on DESC, scope LIMIT 2;
 | `ci-media` | 每周一 06:00 | `CI_MEDIA_CRON` |
 | `ci-digest` | 每周一 07:00 | `CI_DIGEST_CRON` |
 | `ci-ads` | 每周一 06:30 | `CI_ADS_CRON` |
+| `ci-demand` | 每日 05:45（Trends 部分约每周一次） | `CI_DEMAND_CRON`、`CI_TRENDS_MIN_DAYS` |
 
 ⚠️ `ci-digest` 是本项目唯一有**跨 flow 顺序依赖**的排期：它必须晚于 `ci-media`，
 否则简报会漏掉当周的媒体评测。改 `CI_MEDIA_CRON` 时记得一起看这条。

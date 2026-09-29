@@ -13,3 +13,8 @@ imoo-x10,imoo,Watch Phone X10,imoo X10,,true,true,\bimoo\b,\bx\s*-?10\b,自家�
 xplora-xgo3,Xplora,XGO3,Xplora XGO3,,false,true,\bxplora\b,\bx\s*-?go\s*-?3\b,竞品(imoo 线)。写法 XGO3 / X GO 3 / XGO 3;不得命中 XGO2,model,imoo
 xplora-x6play,Xplora,X6Play,Xplora X6Play,,false,true,\bxplora\b,\bx\s*-?6\s*-?play\b,竞品(imoo 线)。写法 X6Play / X6 Play;不得命中 X5 Play,model,imoo
 tcl-mt48,TCL,Movetime Kids' Watch MT48,TCL MT48,,false,true,\btcl\b,\bmt\s*-?48x?\b,"竞品(imoo 线)。写法 TCL Movetime MT48 / MT48X(运营商 eSIM 版，同一款表，一并计入)。TCL 是综合品牌(电视/手机)，只做价格与提及对比，广告层已在 ci_ad_advertiser.csv 用 * 禁用",model,imoo
+imoo-z1-l2,imoo,Watch Phone Z1,imoo Z1 (Amazon listing 2),,true,true,,,"Amazon 第二组 imoo 父商品 B0HDJ7RMX9(变体名是法语 Bleu/Gris/Blanc,疑似从法国站同步的泛欧 listing)。只按 ASIN 取 Amazon 数据",listing,imoo
+imoo-z3-l2,imoo,Watch Phone Z3,imoo Z3 (Amazon listing 2),,true,true,,,Amazon 第二组父商品 B0HDJ7RMX9。只按 ASIN 取 Amazon 数据,listing,imoo
+imoo-z7-l2,imoo,Watch Phone Z7,imoo Z7 (Amazon listing 2),,true,true,,,Amazon 第二组父商品 B0HDJ7RMX9。只按 ASIN 取 Amazon 数据,listing,imoo
+imoo-x10-l2,imoo,Watch Phone X10,imoo X10 (Amazon listing 2),,true,true,,,Amazon 第二组父商品 B0HDJ7RMX9。只按 ASIN 取 Amazon 数据,listing,imoo
+xplora-x6play-telekom,Xplora,X6Play Telekom eSIM,Xplora X6Play (Telekom eSIM),,false,true,,,"Amazon 上 Deutsche Telekom 的 eSIM 版 X6 Play(与一代裸机分开看,运营商版在 Amazon 的表现)。只按 ASIN 取 Amazon 数据",listing,imoo
