@@ -26,6 +26,7 @@ import io
 import os
 import re
 import smtplib
+import unicodedata
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -231,6 +232,31 @@ _ORDER_LEVEL = (_C_CREATED, _C_SHIP_NAME, _C_ADDR1, _C_ADDR2,
                 _C_ZIP, _C_CITY, _C_COUNTRY, _C_COMPANY)
 
 
+# 套装拆解：店铺里作为一个商品卖的套装，仓库是按单品拣货的 —— 输出里必须拆成
+# 组成它的单品，每个单品一行，数量 = 套装数量（买 2 套 → 每个单品各 2）。
+# 键是 Lineitem name（经 _item_key 归一）；值是 [(单品名, 单品 SKU), ...]，
+# 输出顺序即列表顺序。套装自己的 SKU 不输出（仓库没有这个货号）。
+BUNDLES: dict[str, list[tuple[str, str]]] = {
+    "HUTT 10 Zubehör-Set: 1L Spezialreiniger + 8 Reinigungstücher": [
+        ("HUTT Cleaning Solution", "1038823"),
+        ("HUTT 10 Reinigungspad-Set", "1038076"),
+    ],
+}
+
+
+def _item_key(name: str) -> str:
+    """商品名归一：NFC（ö 可能是分解形式）+ 压缩空白 + 忽略大小写。"""
+    return " ".join(unicodedata.normalize("NFC", name or "").split()).casefold()
+
+
+_BUNDLES_BY_KEY = {_item_key(k): v for k, v in BUNDLES.items()}
+
+
+def expand_bundle(item: str, sku: str) -> list[tuple[str, str]]:
+    """套装 → 组成单品的 (名称, SKU) 列表；不是套装就原样返回单元素列表。"""
+    return _BUNDLES_BY_KEY.get(_item_key(item)) or [(item, sku)]
+
+
 def _unwrap(row: list[str], ncols: int) -> list[str]:
     """整行被多包了一层引号时再解一层。
 
@@ -316,7 +342,8 @@ def build_ai_sunrise_rows(payload: bytes) -> list[list[str]]:
     该订单的第一行，后续行项目那些列全是空的；而输出要求每个行项目都带完整地址。
     所以走两遍：先按订单号收集每个订单级字段的第一个非空值，再按**原始行序**输出。
 
-    不做任何业务过滤 —— 取消单、未付款单都照样输出（1:1 转换）。
+    不做任何业务过滤 —— 取消单、未付款单都照样输出。唯一改写行项目的地方是
+    BUNDLES：套装行拆成各单品行（数量沿用套装数量），其余行 1:1 转换。
     """
     header, data_rows = _read_csv(payload)
     if not header:
@@ -341,7 +368,8 @@ def build_ai_sunrise_rows(payload: bytes) -> list[list[str]]:
             v = cell(row, k)
             if v and not c.get(k):
                 c[k] = v                               # 该单第一个非空值胜出
-        items.append((order, qty, item, cell(row, _C_SKU)))
+        for part, part_sku in expand_bundle(item, cell(row, _C_SKU)):
+            items.append((order, qty, part, part_sku))
 
     out = []
     for order, qty, item, sku in items:

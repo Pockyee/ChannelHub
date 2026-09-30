@@ -5,16 +5,18 @@
     docker run --rm -v "$PWD":/w -w /w channelhub-prefect-worker \
       python scripts/check_ai_sunrise_transform.py
 
-校验三件事：
+校验四件事：
   1) 数据行与 tests/fixtures/ai-sunrise-expected.csv 逐格一致
   2) 输出是 UTF-8 BOM + 分号分隔 + CRLF（德语 Excel 双击即开）
   3) 附件名形如 ai-sunrise-DDMMYYYY.csv
+  4) 套装行（BUNDLES）拆成单品行，数量沿用套装数量
 """
 import csv
 import io
 import os
 import re
 import sys
+import unicodedata
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "flows"))
 
@@ -87,6 +89,45 @@ except Exception as exc:
     n_empty, err = -1, exc
 check(n_empty == 0, "只有表头的输入解析出 0 行（由调用方拦截，不发信）")
 print("   （handle_eml 见到 0 行会回信说明 + 发内部告警，不发空附件）")
+
+print("== 6) 套装拆解：Zubehör-Set → Cleaning Solution + Reinigungspad-Set ==")
+BUNDLE = "HUTT 10 Zubehör-Set: 1L Spezialreiniger + 8 Reinigungstücher"
+CS, PAD = ("HUTT Cleaning Solution", "1038823"), ("HUTT 10 Reinigungspad-Set", "1038076")
+src_header = open(SRC, encoding="utf-8-sig").readline().strip().split(",")
+
+
+def order_rows(order, lines):
+    """lines = [(数量, 商品名, SKU), ...] → 只填核心列的 orders_export 片段。"""
+    out = []
+    for qty, item, sku in lines:
+        rec = dict.fromkeys(src_header, "")
+        rec.update({"Name": order, "Created at": "2026-09-01 10:00:00 +0200",
+                    "Lineitem quantity": qty, "Lineitem name": item, "Lineitem sku": sku,
+                    "Shipping Name": "Max Mustermann", "Shipping Zip": "10115"})
+        out.append([rec[h] for h in src_header])
+    return out
+
+
+buf = io.StringIO(newline="")
+w = csv.writer(buf)
+w.writerow(src_header)
+w.writerows(order_rows("#2001", [("1", "HUTT 10 Premium", "1037790"), ("1", BUNDLE, "9999999")]))
+w.writerows(order_rows("#2002", [("2", BUNDLE, "9999999")]))
+# NFD 分解形式的 ö + 多余空白 + 大小写不同，也必须认得出来
+messy = unicodedata.normalize("NFD", BUNDLE).upper().replace(" + ", "  +  ")
+w.writerows(order_rows("#2003", [("3", messy, "")]))
+got_b = [(r[0], r[2], r[3], r[4]) for r in build_ai_sunrise_rows(buf.getvalue().encode("utf-8"))]
+
+check(got_b[:3] == [("ais_2001", "1", "HUTT 10 Premium", "1037790"),
+                    ("ais_2001", "1", *CS), ("ais_2001", "1", *PAD)],
+      "1 套 → 1 + 1，非套装行不受影响", str(got_b[:3]))
+check(got_b[3:5] == [("ais_2002", "2", *CS), ("ais_2002", "2", *PAD)],
+      "2 套 → 2 + 2", str(got_b[3:5]))
+check(got_b[5:] == [("ais_2003", "3", *CS), ("ais_2003", "3", *PAD)],
+      "写法有出入（NFD/大小写/空白）也能拆", str(got_b[5:]))
+check(not any("Zubehör-Set" in r[2] for r in got_b), "输出里不再出现套装本身")
+check(all(len(r) == len(OUT_HEADER) for r in build_ai_sunrise_rows(buf.getvalue().encode("utf-8"))),
+      "拆出来的行列数完整（地址等订单级字段照常带上）")
 
 print()
 if failures:
